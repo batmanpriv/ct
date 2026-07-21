@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ct/pc"
+	"github.com/batmanpriv/ct/pc"
 
 	"github.com/miekg/dns"
 )
