@@ -1,4 +1,4 @@
-module ct
+module github.com/batmanpriv/ct
 
 go 1.26
 
