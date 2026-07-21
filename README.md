@@ -1,5 +1,11 @@
 # CT - Comprehensive Network Testing Tool
 
+**Version: 1.0.1**
+
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/batmanpriv/CheckTest)
+
 ## Overview
 
 **CT** is a powerful, dual-purpose network diagnostic and optimization tool written in Go. It combines a high-performance DNS benchmark with a feature-rich proxy checker, delivering professional-grade network analysis in a single executable.
@@ -45,10 +51,13 @@
 
 ## Installation
 
-### Prerequisites
+### Using Go Install (Recommended)
 
-- **Go 1.25+** (for building from source)
-- **Git** (for cloning)
+```bash
+go install github.com/batmanpriv/CheckTest@latest
+```
+
+This will install the `ct` binary to your `$GOPATH/bin` directory.
 
 ### Build from Source
 
@@ -58,15 +67,15 @@ git clone https://github.com/batmanpriv/CheckTest.git
 cd CheckTest
 
 # Build the binary
-go build -o ct.exe main.go
+go build -o ct main.go
 
-# Or install globally
+# Or install locally
 go install
 ```
 
 ### Pre-built Binaries
 
-Download the latest release for your platform from the [releases page](https://github.com/batmanpriv/ct/releases).
+Download the latest release for your platform from the [releases page](https://github.com/batmanpriv/CheckTest/releases).
 
 ---
 
@@ -76,19 +85,19 @@ Download the latest release for your platform from the [releases page](https://g
 
 ```bash
 # Test DNS servers from a file
-ct -dns dns_servers.txt
+ct -dns resolvers.txt
 
 # Test with HTTP verification
-ct -dns dns_servers.txt -mode 1
+ct -dns resolvers.txt -mode 1
 
 # Test specific domains
-ct -dns dns_servers.txt -domains "google.com,github.com,cloudflare.com"
+ct -dns resolvers.txt -domains "google.com,github.com,cloudflare.com"
 
 # Use more threads for faster testing
-ct -dns dns_servers.txt -t 50
+ct -dns resolvers.txt -t 50
 
 # Score-based sorting (recommended)
-ct -dns dns_servers.txt -mode 1 -score
+ct -dns resolvers.txt -mode 1 -score
 
 # Find and apply the best DNS server
 ct -apply-best
@@ -104,7 +113,7 @@ ct -set status
 ct -proxy proxies.txt
 
 # Specify proxy types to test
-ct -proxy proxies.txt -proxy-types socks4
+ct -proxy proxies.txt -proxy-types socks5,https
 
 # Auto-detect proxy types (slower but more accurate)
 ct -proxy proxies.txt -proxy-auto
@@ -169,7 +178,7 @@ ct -proxy-set status
 | `-proxy-score` | Sort by score instead of speed | `false` |
 | `-proxy-apply-best` | Find best proxy and apply to system | `false` |
 | `-proxy-set` | Set system proxy or check status | `-` |
-| `-proxy-url` | Test URL for proxy checking | `http://httpbin.org/ip` |
+| `-proxy-url` | Test URL for proxy checking | `https://telegram.org` |
 
 ---
 
@@ -299,7 +308,7 @@ Reason:
 Mode 1 performs HTTP verification using the resolved IP:
 
 ```bash
-ct -dns dns_servers.txt -mode 1 -domains "google.com,github.com"
+ct -dns resolvers.txt -mode 1 -domains "google.com,github.com"
 ```
 
 This validates that the DNS server provides correct IP resolution by:
@@ -412,7 +421,7 @@ The tool automatically handles:
 ## Project Structure
 
 ```
-ct/
+CheckTest/
 ├── main.go                    # Main entry point with DNS benchmark
 ├── go.mod                     # Go module definition
 ├── go.sum                     # Dependency checksums
@@ -442,7 +451,7 @@ Contributions are welcome! Please:
 ```bash
 # Clone and enter directory
 git clone https://github.com/batmanpriv/CheckTest.git
-cd ct
+cd CheckTest
 
 # Install dependencies
 go mod download
@@ -472,8 +481,8 @@ MIT License — See [LICENSE](LICENSE) file for details.
 
 ## Support
 
-- **Issues:** [GitHub Issues](https://github.com/batmanpriv/ct/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/batmanpriv/ct/discussions)
+- **Issues:** [GitHub Issues](https://github.com/batmanpriv/CheckTest/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/batmanpriv/CheckTest/discussions)
 
 ---
 
