@@ -54,7 +54,7 @@
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/CheckTest@latest
+go install github.com/batmanpriv/CheckTest@1.0.1
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
