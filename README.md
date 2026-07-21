@@ -1,8 +1,8 @@
 # CT - Comprehensive Network Testing Tool
 
-**Version: 1.0.1**
+**Version: 1.0.2**
 
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/batmanpriv/CheckTest)
 
@@ -54,7 +54,7 @@
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/CheckTest@1.0.1
+go install github.com/batmanpriv/ct@1.0.2
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
@@ -63,8 +63,8 @@ This will install the `ct` binary to your `$GOPATH/bin` directory.
 
 ```bash
 # Clone the repository
-git clone https://github.com/batmanpriv/CheckTest.git
-cd CheckTest
+git clone https://github.com/batmanpriv/ct.git
+cd ct
 
 # Build the binary
 go build -o ct main.go
@@ -75,7 +75,7 @@ go install
 
 ### Pre-built Binaries
 
-Download the latest release for your platform from the [releases page](https://github.com/batmanpriv/CheckTest/releases).
+Download the latest release for your platform from the [releases page](https://github.com/batmanpriv/ct/releases).
 
 ---
 
@@ -421,7 +421,7 @@ The tool automatically handles:
 ## Project Structure
 
 ```
-CheckTest/
+ct/
 ├── main.go                    # Main entry point with DNS benchmark
 ├── go.mod                     # Go module definition
 ├── go.sum                     # Dependency checksums
@@ -450,8 +450,8 @@ Contributions are welcome! Please:
 
 ```bash
 # Clone and enter directory
-git clone https://github.com/batmanpriv/CheckTest.git
-cd CheckTest
+git clone https://github.com/batmanpriv/ct.git
+cd ct
 
 # Install dependencies
 go mod download
@@ -481,8 +481,8 @@ MIT License — See [LICENSE](LICENSE) file for details.
 
 ## Support
 
-- **Issues:** [GitHub Issues](https://github.com/batmanpriv/CheckTest/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/batmanpriv/CheckTest/discussions)
+- **Issues:** [GitHub Issues](https://github.com/batmanpriv/ct/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/batmanpriv/ct/discussions)
 
 ---
 
