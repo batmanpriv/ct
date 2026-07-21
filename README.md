@@ -104,7 +104,7 @@ ct -set status
 ct -proxy proxies.txt
 
 # Specify proxy types to test
-ct -proxy proxies.txt -proxy-types socks5,https
+ct -proxy proxies.txt -proxy-types socks4
 
 # Auto-detect proxy types (slower but more accurate)
 ct -proxy proxies.txt -proxy-auto
