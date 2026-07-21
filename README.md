@@ -19,6 +19,10 @@
 
 ---
 
+# Sc
+
+<img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
+
 ## Features
 
 ### 🔍 DNS Benchmark Module
