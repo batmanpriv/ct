@@ -180,7 +180,6 @@ var geoAPIs = []string{
 }
 
 var configFileName = "sources.json"
-
 var geoCache = make(map[string]GeoInfo)
 var cacheMutex sync.Mutex
 var geoAPIFallback = 0
