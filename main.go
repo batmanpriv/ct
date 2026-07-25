@@ -19,7 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"github.com/batmanpriv/ct/pc"
 	"github.com/batmanpriv/ct/xp"
 	"github.com/miekg/dns"
