@@ -1,4 +1,4 @@
-# CT - Comprehensive Network Testing Tool
+# CT - Check Test
 
 **Version: 1.2.2**
 
