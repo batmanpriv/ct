@@ -1,4 +1,3 @@
-```markdown
 # CT - Comprehensive Network Testing Tool
 
 **Version: 2.0.1**
@@ -542,15 +541,6 @@ ct/
 
 ---
 
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
 ### Development Setup
 
 ```bash
@@ -594,4 +584,3 @@ MIT License — See [LICENSE](LICENSE) file for details.
 ---
 
 *CT — The Complete Network Testing Tool*
-```
