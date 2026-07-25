@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/batmanpriv/ct/pc"
-
+	"github.com/batmanpriv/ct/xp"
 	"github.com/miekg/dns"
 )
 
@@ -51,17 +51,17 @@ type DNSResult struct {
 }
 
 type Config struct {
-	DNSFile     string
-	Threads     int
-	Domains     string
-	Mode        int
-	OutputJSON  bool
-	Score       bool
-	NoColor     bool
-	SetDNS      string
-	ApplyBest   bool
-	Insecure    bool
-	TestURL     string
+	DNSFile    string
+	Threads    int
+	Domains    string
+	Mode       int
+	OutputJSON bool
+	Score      bool
+	NoColor    bool
+	SetDNS     string
+	ApplyBest  bool
+	Insecure   bool
+	TestURL    string
 }
 
 var (
@@ -329,9 +329,36 @@ func parseFlags() Config {
 	proxySet := flag.String("proxy-set", "", "Set system proxy")
 	proxyTestURL := flag.String("proxy-url", "http://httpbin.org/ip", "Test URL for proxy")
 
+	xrayFile := flag.String("xray-file", "", "Xray config file path")
+	xrayDownload := flag.Bool("xray-dl", false, "Download xray configs")
+	xrayLimit := flag.Int("xray-limit", 0, "Limit number of xray configs")
+	xrayThreads := flag.Int("xray-threads", 10, "Xray test threads")
+	xrayTimeout := flag.Float64("xray-timeout", 0.5, "Xray test timeout in seconds")
+	xrayAddSource := flag.String("xray-add-source", "", "Add new xray source URL")
+	xrayTestURL := flag.String("xray-url", "", "Test URL for xray HTTP check")
+	xrayOutput := flag.String("xray-output", "alive_configs.txt", "Output file for alive xray configs")
+
 	flag.Parse()
 
 	config.TestURL = testURL
+
+	if *xrayFile != "" || *xrayDownload || *xrayAddSource != "" {
+		xrayConfig := xp.CheckerConfig{
+			ConfigFile: *xrayFile,
+			Download:   *xrayDownload,
+			Limit:      *xrayLimit,
+			Threads:    *xrayThreads,
+			Timeout:    *xrayTimeout,
+			AddSource:  *xrayAddSource,
+			TestURL:    *xrayTestURL,
+			NoColor:    false,
+			OutputFile: *xrayOutput,
+		}
+		xp.RunChecker(xrayConfig)
+		if *xrayFile != "" || *xrayDownload || *xrayAddSource != "" {
+			os.Exit(0)
+		}
+	}
 
 	if *proxyFile != "" || *proxyDownload || *proxyScrape || *proxyApplyBest || *proxySet != "" {
 		pcConfig := pc.Config{
@@ -1169,7 +1196,7 @@ func printSummary(results []DNSResult, config Config) {
 	}
 
 	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
-  fmt.Println("Git&Tg: github.com/batmanpriv")
+	fmt.Println("Git&Tg: github.com/batmanpriv")
 	fmt.Printf("Total DNS Tested: %d\n", len(results))
 	fmt.Printf("Valid DNS (Lookup OK): %d\n", totalLookup)
 	if config.Mode >= 1 {
