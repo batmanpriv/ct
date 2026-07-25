@@ -47,7 +47,6 @@
 | `-xray-threads` | Concurrent test threads (default: 10) |
 | `-xray-timeout` | Test timeout in seconds (default: 0.5) |
 | `-xray-add-source` | Add new Xray config source URL |
-| `-xray-url` | Test URL for HTTP verification |
 | `-xray-output` | Output file for alive configs |
 
 ---
@@ -193,9 +192,6 @@ ct -xray-dl
 # Limit to 100 configs
 ct -xray-dl -xray-limit 100
 
-# Test with HTTP verification
-ct -xray-file configs.txt -xray-url https://www.google.com
-
 # Custom threads and timeout
 ct -xray-file configs.txt -xray-threads 20 -xray-timeout 1
 
@@ -205,8 +201,6 @@ ct -xray-add-source https://example.com/configs.txt
 # Output to custom file
 ct -xray-file configs.txt -xray-output alive.txt
 
-# Full power: Download, test with HTTP, limit to 50, 20 threads
-ct -xray-dl -xray-url https://www.google.com -xray-limit 50 -xray-threads 20
 ```
 
 ---
@@ -254,7 +248,6 @@ ct -xray-dl -xray-url https://www.google.com -xray-limit 50 -xray-threads 20
 | `-xray-threads` | Number of concurrent threads | `10` |
 | `-xray-timeout` | Test timeout in seconds | `0.5` |
 | `-xray-add-source` | Add new config source URL | `-` |
-| `-xray-url` | Test URL for HTTP verification | `-` |
 | `-xray-output` | Output file for alive configs | `alive_configs.txt` |
 
 ---
