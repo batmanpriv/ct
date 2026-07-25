@@ -1,6 +1,7 @@
+```markdown
 # CT - Comprehensive Network Testing Tool
 
-**Version: 1.0.2**
+**Version: 2.0.1**
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,12 +9,12 @@
 
 ## Overview
 
-**CT** is a powerful, dual-purpose network diagnostic and optimization tool written in Go. It combines a high-performance DNS benchmark with a feature-rich proxy checker, delivering professional-grade network analysis in a single executable.
+**CT** is a powerful, multi-purpose network diagnostic and optimization tool written in Go. It combines a high-performance DNS benchmark, a feature-rich proxy checker, and a comprehensive Xray/V2Ray config tester—all in a single executable.
 
 ### Why CT?
 
-- **All-in-One Solution** — No need for separate DNS benchmarking and proxy checking tools
-- **Production-Ready** — Battle-tested with thousands of DNS servers and proxies
+- **All-in-One Solution** — DNS benchmarking, proxy checking, and Xray config testing
+- **Production-Ready** — Battle-tested with thousands of DNS servers, proxies, and configs
 - **Cross-Platform** — Windows, Linux, and macOS support with native system integration
 - **Performance-First** — Concurrent architecture maximizes throughput while minimizing resource usage
 
@@ -22,6 +23,35 @@
 # ScreenShot
 
 <img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
+
+## What's New in 2.0.1
+
+### 🚀 Xray/V2Ray Config Checker
+
+- **Multi-Protocol Support** — VLESS, VMESS, Trojan, ShadowSocks
+- **Automatic Binary Management** — Downloads Xray core binary automatically
+- **Config Parsing** — Parse and test VLESS, VMESS, Trojan, and SS links
+- **GeoIP Detection** — Country, city, and ISP identification for each server
+- **HTTP Verification** — Optional HTTP request test through proxy
+- **Config Scraping** — Download configs from multiple public sources
+- **Custom Sources** — Add your own config sources
+- **Smart Caching** — Cache location data to avoid API rate limits
+- **Multi-API Fallback** — Uses multiple GeoIP APIs with automatic fallback
+
+### 🆕 New Flags
+
+| Flag | Description |
+|------|-------------|
+| `-xray-file` | Xray config file path |
+| `-xray-dl` | Download configs from online sources |
+| `-xray-limit` | Limit number of configs to test |
+| `-xray-threads` | Concurrent test threads (default: 10) |
+| `-xray-timeout` | Test timeout in seconds (default: 0.5) |
+| `-xray-add-source` | Add new Xray config source URL |
+| `-xray-url` | Test URL for HTTP verification |
+| `-xray-output` | Output file for alive configs |
+
+---
 
 ## Features
 
@@ -45,9 +75,23 @@
 - **Proxy Scraping** — Download or scrape proxies from various sources
 - **IPv6 Support** — Full IPv6 proxy detection and testing
 
+### 🛸 Xray Config Checker Module (New!)
+
+- **Protocol Support** — VLESS, VMESS, Trojan, ShadowSocks
+- **Transport Types** — TCP, WS (WebSocket), gRPC
+- **Security Types** — TLS, Reality, None
+- **Config Sources** — 20+ public config sources pre-configured
+- **Automatic Binary** — Downloads Xray core binary on first run
+- **Live Testing** — Validates configs by actually connecting through proxy
+- **HTTP Test** — Optional HTTP request test for 100% validation
+- **Location Detection** — Country, city, and ISP for each server
+- **Config Deduplication** — Automatically removes duplicate configs
+- **Smart Caching** — Caches GeoIP data to prevent rate limiting
+- **Multi-API Fallback** — Uses ip-api.com, ipinfo.io with automatic fallback
+
 ### ⚡ System Integration
 
-- **Automatic Configuration** — Apply best DNS or proxy to your system with one command
+- **Automatic Configuration** — Apply best DNS, proxy, or Xray config to your system
 - **Cross-Platform System Settings** — Native support for Windows, Linux, macOS
 - **Status Reporting** — View current system DNS and proxy settings
 
@@ -58,7 +102,7 @@
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/ct@1.0.2
+go install github.com/batmanpriv/ct@2.0.1
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
@@ -131,20 +175,39 @@ ct -proxy proxies.txt -proxy-score
 # Download fresh proxies
 ct -proxy-dl
 
-# Download specific proxy types
-ct -proxy-dl -proxy-type socks5
-
-# Scrape proxies from URL
-ct -proxy-scrape https://example.com/proxies.txt
-
-# Deep scraping (recursive)
-ct -proxy-scrape-deep https://example.com/proxies.txt
-
 # Find and apply the best proxy
 ct -proxy-apply-best
 
 # Check current proxy settings
 ct -proxy-set status
+```
+
+### Xray Config Testing (New!)
+
+```bash
+# Test configs from a file
+ct -xray-file configs.txt
+
+# Download and test configs from online sources
+ct -xray-dl
+
+# Limit to 100 configs
+ct -xray-dl -xray-limit 100
+
+# Test with HTTP verification
+ct -xray-file configs.txt -xray-url https://www.google.com
+
+# Custom threads and timeout
+ct -xray-file configs.txt -xray-threads 20 -xray-timeout 1
+
+# Add a custom source
+ct -xray-add-source https://example.com/configs.txt
+
+# Output to custom file
+ct -xray-file configs.txt -xray-output alive.txt
+
+# Full power: Download, test with HTTP, limit to 50, 20 threads
+ct -xray-dl -xray-url https://www.google.com -xray-limit 50 -xray-threads 20
 ```
 
 ---
@@ -176,13 +239,24 @@ ct -proxy-set status
 | `-proxy-types` | Comma-separated proxy types to test | `-` |
 | `-proxy-auto` | Auto-detect proxy type | `true` |
 | `-proxy-dl` | Download proxies from public sources | `false` |
-| `-proxy-type` | Proxy type to download (`all`, `socks5`, etc.) | `all` |
 | `-proxy-scrape` | Scrape proxies from URL | `false` |
-| `-proxy-scrape-deep` | Deep recursive scraping | `false` |
 | `-proxy-score` | Sort by score instead of speed | `false` |
 | `-proxy-apply-best` | Find best proxy and apply to system | `false` |
 | `-proxy-set` | Set system proxy or check status | `-` |
 | `-proxy-url` | Test URL for proxy checking | `https://telegram.org` |
+
+### Xray Config Module Flags (New!)
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-xray-file` | Path to Xray config file | `-` |
+| `-xray-dl` | Download configs from online sources | `false` |
+| `-xray-limit` | Limit number of configs to test | `0` (no limit) |
+| `-xray-threads` | Number of concurrent threads | `10` |
+| `-xray-timeout` | Test timeout in seconds | `0.5` |
+| `-xray-add-source` | Add new config source URL | `-` |
+| `-xray-url` | Test URL for HTTP verification | `-` |
+| `-xray-output` | Output file for alive configs | `alive_configs.txt` |
 
 ---
 
@@ -218,6 +292,17 @@ socks4://192.168.1.4:1081
 192.168.1.6:1080
 ```
 
+### Xray Config List
+
+One config link per line. Supports VLESS, VMESS, Trojan, SS:
+
+```
+vless://uuid@server:port?security=tls&type=ws&path=/path&host=domain.com
+vmess://base64_encoded_config
+trojan://password@server:port?security=tls&type=ws&sni=domain.com
+ss://method:password@server:port
+```
+
 ---
 
 ## Output Examples
@@ -234,8 +319,6 @@ Progress: 100.0% (1000/1000) | Valid: 847
 #1   1.1.1.1          8ms         45ms         US         Cloudflare           95
 #2   8.8.8.8          12ms        52ms         US         Google               92
 #3   9.9.9.9          15ms        58ms         US         Quad9                88
-#4   94.140.14.14     22ms        65ms         NL         AdGuard              85
-#5   208.67.222.222   25ms        70ms         US         Cisco                82
 
 ========================================
 Total DNS Tested: 847
@@ -245,62 +328,61 @@ Average Score: 67/100
 Fastest DNS: 1.1.1.1 (8ms)
 Highest Score: 1.1.1.1 (95/100)
 ========================================
-
-========================================
-      RECOMMENDED DNS CONFIGURATION
-========================================
-
-Primary:   1.1.1.1
-Secondary: 8.8.8.8
-
-Reason:
-  • Latency: 8ms (Excellent)
-  • HTTPS: 45ms
-  • DNSSEC: true
-  • DoH: true
-  • IPv6: true
-  • Score: 95/100
 ```
 
-### Proxy Checker Output
+### Xray Config Output
 
 ```
-Proxy Checker - Testing 5000 proxies
+Downloading configs from online sources...
+Downloaded 245 configs from https://raw.githubusercontent.com/...
+Loaded 245 configs
+Xray binary already exists
+Using xray binary: C:\Users\\.xray-test\xray.exe
+Threads: 10, Timeout: 0.5s
 
-Progress: 100.0% (5000/5000) | Working: 234
+Testing configs...
 
-#    Proxy                Type      Latency    Country      Anonymity   Speed    Score  IPv6  Auth
-----------------------------------------------------------------------------------------------------
-#1   socks5://1.2.3.4      socks5    45ms       US           elite       fast     85     ✅    ❌
-#2   https://5.6.7.8       https     52ms       DE           anonymous   fast     78     ❌    ✅
-#3   http://9.10.11.12     http      65ms       GB           transparent medium   62     ❌    ❌
-#4   socks4://13.14.15.16  socks4    78ms       CA           elite       medium   58     ❌    ❌
-#5   socks5://17.18.19.20  socks5    95ms       AU           anonymous   slow     45     ✅    ✅
+[0] ✓ ALIVE 173.245.58.75(vless) 1630ms [United States - San Francisco - Cloudflare]
+[1] ✓ ALIVE 93.152.205.216(vless) 1630ms [Netherlands - Amsterdam - Serverius]
+[2] ✗ DEAD 104.21.94.161: not responding
+[3] ✓ ALIVE 162.159.38.119(vless) 2100ms [United States - San Francisco - Cloudflare]
 
-========================================
-Total Proxies in File: 5000
-Working Proxies: 234
-Success Rate: 4.7%
-Average Latency: 67ms
-Average Score: 61/100
-Best Proxy: socks5://1.2.3.4 (45ms)
-========================================
+=== SUMMARY ===
+Total: 245
+Alive: 78
+Dead: 167
 
-========================================
-      RECOMMENDED PROXY CONFIGURATION
-========================================
+=== LOCATION STATS ===
+United States: 45
+Netherlands: 12
+Germany: 8
+France: 6
+United Kingdom: 4
+Canada: 3
 
-Primary:   socks5://1.2.3.4
+Alive configs saved to: alive_configs.txt
+```
 
-Reason:
-  • Type: socks5
-  • Latency: 45ms
-  • Anonymity: elite
-  • Speed: fast
-  • IPv6: true
-  • Auth: false
-  • Score: 85/100
-========================================
+---
+
+## Xray Config Sources
+
+The tool automatically downloads from these sources:
+
+1. ebrasha/free-v2ray-public-list (vless, vmess, trojan, ss)
+2. Epodonios/v2ray-configs
+3. roosterkid/openproxylist
+4. miladtahanian/V2RayCFGDumper
+5. barry-far/V2ray-config (Sub1-8)
+6. barry-far/V2ray-config (Splitted-By-Protocol)
+
+### Adding Custom Sources
+
+```bash
+# Add a single source
+ct -xray-add-source https://example.com/my-configs.txt
+
+# Sources are saved to sources.json for future use
 ```
 
 ---
@@ -315,10 +397,19 @@ Mode 1 performs HTTP verification using the resolved IP:
 ct -dns resolvers.txt -mode 1 -domains "google.com,github.com"
 ```
 
-This validates that the DNS server provides correct IP resolution by:
-1. Performing DNS lookup for the domain
-2. Establishing HTTPS connection to the resolved IP
-3. Verifying TLS certificate and HTTP response
+### Xray HTTP Verification
+
+Tests configs by actually making HTTP requests through the proxy:
+
+```bash
+ct -xray-file configs.txt -xray-url https://www.google.com
+```
+
+This validates that the config works by:
+1. Starting Xray with the config
+2. Connecting through the proxy
+3. Making an HTTP request
+4. Verifying the response
 
 ### Scoring System
 
@@ -338,7 +429,6 @@ The scoring algorithm evaluates:
 - IPv6: 5 points
 - UDP & TCP support: 5 points
 - DoT/DoH: 5 points
-- Additional record types: 2 points each
 
 ### Automated System Configuration
 
@@ -355,10 +445,7 @@ sudo ct -apply-best
 sudo ct -apply-best
 ```
 
-The tool automatically detects your OS and applies the recommended settings using:
-- Windows: `netsh` + PowerShell
-- Linux: `systemd-resolved` or `/etc/resolv.conf`
-- macOS: `networksetup`
+The tool automatically detects your OS and applies the recommended settings.
 
 ---
 
@@ -374,18 +461,14 @@ The tool automatically detects your OS and applies the recommended settings usin
   - Higher threads significantly speed up testing
   - Recommended: 100-200 for thousands of proxies
 
+- **Xray Testing:** Use `-xray-threads` flag (default: 10)
+  - Each test starts a new Xray instance
+  - Recommended: 5-20 depending on system resources
+
 ### Memory Considerations
 
 - Results are stored in memory during testing
-- For very large lists (>50,000 items), consider:
-  - Using the `-json` flag to save results incrementally
-  - Filtering input lists before testing
-
-### Network Configuration
-
-- Ensure stable network connection during testing
-- DNS-over-HTTPS and DoT require proper TLS configuration
-- Use `-insecure` flag for testing with self-signed certificates
+- For very large lists, use `-xray-limit` to limit testing
 
 ---
 
@@ -397,28 +480,20 @@ The tool automatically detects your OS and applies the recommended settings usin
 - Verify the file path is correct
 - Use absolute paths or proper relative paths
 
-**"No valid proxies found"**
-- Check proxy format in the input file
-- Ensure proxies are accessible from your network
-- Increase timeout with proxy-specific flags
+**"Xray binary not found"**
+- The tool automatically downloads Xray on first run
+- Ensure you have internet connection
+- Check antivirus isn't blocking the download
 
 **"Failed to set DNS/Proxy (Permission denied)"**
 - Run with administrator/root privileges
 - On Windows: Right-click → Run as Administrator
 - On Linux/macOS: Use `sudo`
 
-**Slow testing performance**
-- Increase thread count with `-t` or `-proxy-t`
-- Reduce timeout values
-- Test smaller batches
-
-### DNS Server Format Issues
-
-The tool automatically handles:
-- Missing port (defaults to 53)
-- IPv6 addresses with and without brackets
-- Comments starting with `#`
-- Whitespace and special characters
+**"GeoIP API rate limited"**
+- The tool automatically falls back to alternative APIs
+- Location data is cached to minimize API calls
+- Use `-xray-limit` to reduce testing volume
 
 ---
 
@@ -429,15 +504,41 @@ ct/
 ├── main.go                    # Main entry point with DNS benchmark
 ├── go.mod                     # Go module definition
 ├── go.sum                     # Dependency checksums
-├── resolvers.txt              # DNS server list (7,886 servers)
-└── pc/
-    └── proxy-checker.go       # Proxy checker module
+├── pc/
+│   └── proxy-checker.go       # Proxy checker module
+├── xp/
+│   └── xray-checker.go        # Xray config checker module (New!)
+└── resolvers.txt              # DNS server list
 ```
 
 ### Dependencies
 
 - [`golang.org/x/net/proxy`](https://pkg.go.dev/golang.org/x/net/proxy) — SOCKS proxy support
 - [`github.com/miekg/dns`](https://pkg.go.dev/github.com/miekg/dns) — DNS protocol implementation
+
+---
+
+## Changelog
+
+### 2.0.1 (2024)
+- Added Xray/V2Ray config checker module
+- Multi-protocol support: VLESS, VMESS, Trojan, SS
+- Automatic Xray binary download
+- Config scraping from 20+ public sources
+- Custom source management
+- GeoIP detection with multi-API fallback
+- HTTP verification for 100% config validation
+
+### 1.0.2
+- Added proxy checker module
+- Multi-protocol proxy support
+- Proxy scraping and downloading
+- System proxy configuration
+
+### 1.0.0
+- Initial DNS benchmark release
+- DNS-over-TLS and DNS-over-HTTPS support
+- System DNS configuration
 
 ---
 
@@ -479,7 +580,9 @@ MIT License — See [LICENSE](LICENSE) file for details.
 
 - DNS protocol support by [miekg/dns](https://github.com/miekg/dns)
 - Proxy support by [golang.org/x/net](https://pkg.go.dev/golang.org/x/net)
-- Public proxy and DNS lists from various open-source projects
+- Xray core by [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
+- GeoIP data from [ip-api.com](https://ip-api.com) and [ipinfo.io](https://ipinfo.io)
+- Public config lists from various open-source projects
 
 ---
 
@@ -491,3 +594,4 @@ MIT License — See [LICENSE](LICENSE) file for details.
 ---
 
 *CT — The Complete Network Testing Tool*
+```
