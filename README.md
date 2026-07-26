@@ -1,6 +1,6 @@
 # CT - Check Test
 
-**Version: 1.2.4**
+**Version: 1.2.5**
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -23,7 +23,7 @@
 
 <img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
 
-## What's New in 1.2.4
+## What's New in 1.2.5
 
 ### 🚀 Xray Config Checker Improvements
 
@@ -117,7 +117,7 @@
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/ct@1.2.4
+go install github.com/batmanpriv/ct@1.2.5
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
@@ -530,7 +530,7 @@ ct/
 
 ## Changelog
 
-### 1.2.4 (2024)
+### 1.2.5 (2024)
 - Added Xray/V2Ray config checker module
 - Multi-protocol support: VLESS, VMESS, Trojan, SS
 - Automatic Xray binary download
