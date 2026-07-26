@@ -27,7 +27,6 @@
 
 ### 🚀 Xray Config Checker Improvements
 
-- Added **Region Sorting** (`-xray-region-sort`)
 - Automatically saves alive configs into country-based files
 - Added **custom HTTP test URL** (`-xray-url`)
 - HTTP status code reporting
