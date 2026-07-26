@@ -12,11 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,60 +26,40 @@ import (
 )
 
 type ProxyResult struct {
-	Proxy      string `json:"proxy"`
-	Type       string `json:"type"`
-	Working    bool   `json:"working"`
-	LatencyMs  int64  `json:"latency_ms"`
-	Country    string `json:"country"`
-	Provider   string `json:"provider"`
-	Anonymity  string `json:"anonymity"`
-	Speed      string `json:"speed"`
-	Score      int    `json:"score"`
-	CheckTime  string `json:"check_time"`
-	Error      string `json:"error,omitempty"`
-	IPv6       bool   `json:"ipv6"`
-	HasAuth    bool   `json:"has_auth"`
+	Proxy     string `json:"proxy"`
+	Type      string `json:"type"`
+	Working   bool   `json:"working"`
+	LatencyMs int64  `json:"latency_ms"`
+	Country   string `json:"country"`
+	Provider  string `json:"provider"`
+	Anonymity string `json:"anonymity"`
+	Speed     string `json:"speed"`
+	Score     int    `json:"score"`
+	CheckTime string `json:"check_time"`
+	Error     string `json:"error,omitempty"`
+	IPv6      bool   `json:"ipv6"`
+	HasAuth   bool   `json:"has_auth"`
 }
 
 type Config struct {
-	ProxyFile     string
-	Threads       int
-	TestURL       string
-	Timeout       int
-	OutputJSON    bool
-	Score         bool
-	NoColor       bool
-	Types         string
-	SetProxy      string
-	ApplyBest     bool
-	AutoDetect    bool
-	Download      bool
-	Scrape        bool
-	ScrapeDeep    bool
-	Headers       string
-	ProxyType     string
-	Insecure      bool
+	ProxyFile  string
+	Threads    int
+	TestURL    string
+	Timeout    int
+	OutputJSON bool
+	Score      bool
+	NoColor    bool
+	Types      string
+	SetProxy   string
+	ApplyBest  bool
+	AutoDetect bool
+	Download   bool
+	Scrape     bool
+	ScrapeDeep bool
+	ProxyType  string
+	Insecure   bool
+	Sources    string
 }
-
-var (
-	cleanRegex      = regexp.MustCompile(`[^0-9a-zA-Z\.\:\-\[\]]`)
-	proxyRegex      = regexp.MustCompile(`(?:socks5|socks4|https?):\/\/[^\s]+|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b`)
-	ipRegex         = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
-	ipv6Regex       = regexp.MustCompile(`\b[0-9a-fA-F:]+:[0-9a-fA-F:]+\b`)
-	portRegex       = regexp.MustCompile(`\b\d{2,5}\b`)
-	mu              sync.Mutex
-	allResults      []ProxyResult
-	downloadedIP    = make(map[string]bool)
-	ipMutex         sync.Mutex
-	geoCache        = make(map[string]GeoInfo)
-	geoCacheMu      sync.Mutex
-	anonymityCache  = make(map[string]string)
-	anonymityMu     sync.Mutex
-	totalProxies    int
-	proxyTypeRegex  = regexp.MustCompile(`^(socks5|socks4|https?):\/\/`)
-	authRegex       = regexp.MustCompile(`^(socks5|socks4|https?):\/\/([^:]+):([^@]+)@`)
-	ipv6Bracket     = regexp.MustCompile(`^\[[0-9a-fA-F:]+\]`)
-)
 
 type GeoInfo struct {
 	Country  string
@@ -94,15 +74,55 @@ type UIState struct {
 	shouldQuit bool
 }
 
-var uiState = &UIState{}
+var (
+	uiState        UIState
+	allResults     []ProxyResult
+	allResultsMu   sync.Mutex
+	geoCache       = map[string]GeoInfo{}
+	geoCacheMu     sync.Mutex
+	anonymityCache = map[string]string{}
+	anonymityMu    sync.Mutex
+	validProxyMu   sync.Mutex
+	totalProxies   int
 
-var userAgents = []string{
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+	proxyRegex = regexp.MustCompile(`(?:socks5|socks4|https?):\/\/[^\s]+|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b`)
+	ipRegex    = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
+	ipv6Regex  = regexp.MustCompile(`\b[0-9a-fA-F:]+:[0-9a-fA-F:]+\b`)
+	portRegex  = regexp.MustCompile(`\b\d{2,5}\b`)
+	linkRegex  = regexp.MustCompile(`https?://[^\s"'<>]+`)
+	authRegex  = regexp.MustCompile(`^(?:https?|socks4|socks5)://([^:@\s]+):([^@\s]+)@(.+)$`)
+
+	userAgents = []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+	}
+)
+
+func main() {
+	cfg := Config{}
+	flag.StringVar(&cfg.ProxyFile, "proxy", "", "Proxy file path")
+	flag.StringVar(&cfg.TestURL, "url", "https://telegram.org", "Test URL")
+	flag.IntVar(&cfg.Threads, "threads", 50, "Number of threads")
+	flag.IntVar(&cfg.Timeout, "timeout", 7, "Timeout in seconds")
+	flag.BoolVar(&cfg.OutputJSON, "json", false, "Save results as JSON")
+	flag.BoolVar(&cfg.Score, "score", true, "Enable scoring")
+	flag.BoolVar(&cfg.NoColor, "no-color", false, "Disable colors")
+	flag.StringVar(&cfg.Types, "types", "", "Proxy types (http,socks5)")
+	flag.StringVar(&cfg.SetProxy, "set-proxy", "", "Set system proxy")
+	flag.BoolVar(&cfg.ApplyBest, "apply-best", false, "Apply best proxy")
+	flag.BoolVar(&cfg.AutoDetect, "auto-detect", true, "Auto detect type")
+	flag.BoolVar(&cfg.Download, "download", false, "Download proxies")
+	flag.BoolVar(&cfg.Scrape, "scrape", false, "Scrape proxies from URL")
+	flag.BoolVar(&cfg.ScrapeDeep, "deep", false, "Deep scrape")
+	flag.StringVar(&cfg.ProxyType, "type", "all", "Proxy type for download")
+	flag.BoolVar(&cfg.Insecure, "insecure", true, "Skip TLS verification")
+	flag.StringVar(&cfg.Sources, "sources", "", "Custom sources for scraping")
+	flag.Parse()
+
+	RunProxyChecker(cfg)
 }
 
 func RunProxyChecker(config Config) {
@@ -118,7 +138,7 @@ func RunProxyChecker(config Config) {
 	if config.ApplyBest {
 		best := findAndApplyBestProxy(config)
 		if best != "" {
-			fmt.Printf("\n✓ Best proxy (%s) applied to system\n", best)
+			fmt.Printf("\nBest proxy applied to system: %s\n", best)
 		}
 		return
 	}
@@ -136,36 +156,24 @@ func RunProxyChecker(config Config) {
 	if config.ProxyFile == "" {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Print("Proxy file path: ")
-		proxyPath, _ := reader.ReadString('\n')
-		config.ProxyFile = strings.TrimSpace(proxyPath)
+		path, _ := reader.ReadString('\n')
+		config.ProxyFile = strings.TrimSpace(path)
 	}
 
-	if config.Threads < 2 {
+	if config.Threads < 1 {
 		config.Threads = 50
 	}
-
+	if config.Timeout < 1 {
+		config.Timeout = 7
+	}
 	if config.TestURL == "" {
 		config.TestURL = "https://telegram.org"
 	}
 
-	if config.Timeout == 0 {
-		config.Timeout = 5
-	}
-
-	f, err := os.Open(config.ProxyFile)
+	proxyList, err := readProxyFile(config.ProxyFile)
 	if err != nil {
-		fmt.Println("Error opening file:", err)
+		fmt.Printf("Error reading file: %v\n", err)
 		return
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	var proxyList []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			proxyList = append(proxyList, line)
-		}
 	}
 
 	if len(proxyList) == 0 {
@@ -175,75 +183,106 @@ func RunProxyChecker(config Config) {
 
 	totalProxies = len(proxyList)
 	uiState.total = len(proxyList)
+	uiState.results = nil
+	uiState.completed = 0
+	uiState.shouldQuit = false
 
 	fmt.Printf("Testing %d proxies with %d threads...\n\n", len(proxyList), config.Threads)
 
 	go uiLoop(config)
 
 	jobs := make(chan string, len(proxyList))
+	results := make(chan ProxyResult, len(proxyList))
+
 	var wg sync.WaitGroup
+	var collector sync.WaitGroup
+
+	collector.Add(1)
+	go func() {
+		defer collector.Done()
+		for r := range results {
+			if r.Working {
+				uiState.mu.Lock()
+				uiState.results = append(uiState.results, r)
+				uiState.mu.Unlock()
+				saveValidProxy(r.Proxy)
+			}
+			atomic.AddInt32(&uiState.completed, 1)
+		}
+	}()
 
 	for i := 0; i < config.Threads; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for proxyStr := range jobs {
-				result := testProxy(proxyStr, config)
-				if result.Working {
-					uiState.mu.Lock()
-					uiState.results = append(uiState.results, result)
-					uiState.mu.Unlock()
-					saveValidProxy(proxyStr)
-				}
-				atomic.AddInt32(&uiState.completed, 1)
+				results <- testProxy(proxyStr, config)
 			}
 		}()
 	}
 
-	for _, proxy := range proxyList {
-		jobs <- proxy
+	for _, p := range proxyList {
+		jobs <- p
 	}
 	close(jobs)
 	wg.Wait()
+	close(results)
+	collector.Wait()
 
 	uiState.mu.Lock()
 	uiState.shouldQuit = true
 	uiState.mu.Unlock()
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+
+	uiState.mu.RLock()
+	finalResults := make([]ProxyResult, len(uiState.results))
+	copy(finalResults, uiState.results)
+	uiState.mu.RUnlock()
 
 	if config.OutputJSON {
-		saveJSON(uiState.results)
+		saveJSON(finalResults)
 	}
 
-	printSummary(uiState.results, config)
-	printRecommendation(uiState.results, config)
+	printSummary(finalResults, config)
+	printRecommendation(finalResults, config)
 }
 
-func GetResults() []ProxyResult {
-	uiState.mu.RLock()
-	defer uiState.mu.RUnlock()
-	return uiState.results
-}
+func readProxyFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
 
-func GetValidProxies() []string {
-	uiState.mu.RLock()
-	defer uiState.mu.RUnlock()
-	var valid []string
-	for _, r := range uiState.results {
-		if r.Working {
-			valid = append(valid, r.Proxy)
+	var proxies []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			proxies = append(proxies, line)
 		}
 	}
-	return valid
+	return uniqueStrings(proxies), scanner.Err()
+}
+
+func uniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func uiLoop(config Config) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	for {
-		<-ticker.C
+	for range ticker.C {
 		uiState.mu.RLock()
 		if uiState.shouldQuit {
 			uiState.mu.RUnlock()
@@ -251,15 +290,17 @@ func uiLoop(config Config) {
 		}
 		results := make([]ProxyResult, len(uiState.results))
 		copy(results, uiState.results)
+		total := uiState.total
 		completed := atomic.LoadInt32(&uiState.completed)
 		uiState.mu.RUnlock()
 
 		fmt.Print("\033[H\033[2J")
-		fmt.Printf("Proxy Checker - Testing %d proxies\n\n", uiState.total)
+		fmt.Printf("Proxy Checker - Testing %d proxies\n", total)
 
-		progress := float64(completed) / float64(uiState.total) * 100
-		fmt.Printf("Progress: %.1f%% (%d/%d) | Working: %d\n\n",
-			progress, completed, uiState.total, len(results))
+		if total > 0 {
+			progress := float64(completed) / float64(total) * 100
+			fmt.Printf("Progress: %.1f%% (%d/%d) Working: %d\n\n", progress, completed, total, len(results))
+		}
 
 		if len(results) > 0 {
 			sortResults(results, config)
@@ -272,13 +313,13 @@ func uiLoop(config Config) {
 
 func sortResults(results []ProxyResult, config Config) {
 	sort.Slice(results, func(i, j int) bool {
-		if config.Score {
-			if results[i].Score != results[j].Score {
-				return results[i].Score > results[j].Score
-			}
+		if config.Score && results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		if results[i].LatencyMs != results[j].LatencyMs {
 			return results[i].LatencyMs < results[j].LatencyMs
 		}
-		return results[i].LatencyMs < results[j].LatencyMs
+		return results[i].Proxy < results[j].Proxy
 	})
 }
 
@@ -290,57 +331,55 @@ func printTable(results []ProxyResult, config Config) {
 	reset := "\033[0m"
 
 	if config.NoColor {
-		green = ""
-		yellow = ""
-		red = ""
-		blue = ""
-		reset = ""
+		green, yellow, red, blue, reset = "", "", "", "", ""
 	}
 
-	fmt.Printf("%-4s %-20s %-10s %-10s %-12s %-10s %-8s %-6s %-6s %-6s\n",
+	fmt.Printf("%-4s %-22s %-10s %-10s %-12s %-10s %-8s %-6s %-6s %-6s\n",
 		"#", "Proxy", "Type", "Latency", "Country", "Anonymity", "Speed", "Score", "IPv6", "Auth")
 	fmt.Println(strings.Repeat("-", 110))
 
-	for i, result := range results {
+	for i, r := range results {
 		if i >= 20 {
 			break
 		}
 
-		latencyStr := fmt.Sprintf("%dms", result.LatencyMs)
-		if result.LatencyMs < 0 {
-			latencyStr = "FAIL"
+		latency := fmt.Sprintf("%dms", r.LatencyMs)
+		if r.LatencyMs < 0 {
+			latency = "FAIL"
 		}
 
-		country := result.Country
+		country := r.Country
 		if country == "" {
 			country = "Unknown"
 		}
 
-		anonymity := result.Anonymity
+		anonymity := r.Anonymity
 		if anonymity == "" {
 			anonymity = "-"
 		}
 
-		speed := result.Speed
+		speed := r.Speed
 		if speed == "" {
 			speed = "-"
 		}
 
-		ipv6Str := "❌"
-		if result.IPv6 {
-			ipv6Str = "✅"
+		ipv6 := "❌"
+		if r.IPv6 {
+			ipv6 = "✅"
 		}
 
-		authStr := "❌"
-		if result.HasAuth {
-			authStr = "✅"
+		auth := "❌"
+		if r.HasAuth {
+			auth = "✅"
 		}
 
 		typeColor := blue
-		if result.Type == "socks5" {
+		if r.Type == "socks5" {
 			typeColor = green
-		} else if result.Type == "socks4" {
+		} else if r.Type == "socks4" {
 			typeColor = yellow
+		} else if r.Type == "https" {
+			typeColor = red
 		}
 
 		speedColor := green
@@ -350,63 +389,55 @@ func printTable(results []ProxyResult, config Config) {
 			speedColor = red
 		}
 
-		rank := fmt.Sprintf("#%d", i+1)
-		fmt.Printf("%s%-4s %-20s %s%-10s%s %-10s %-12s %-10s %s%-8s%s %-6d %-6s %-6s%s\n",
-			green, rank, result.Proxy,
-			typeColor, result.Type, reset,
-			latencyStr,
-			country,
-			anonymity,
+		fmt.Printf("%-4d %s%-22s%s %s%-10s%s %-10s %-12s %-10s %s%-8s%s %-6d %-6s %-6s\n",
+			i+1, green, r.Proxy, reset, typeColor, r.Type, reset,
+			latency, country, anonymity,
 			speedColor, speed, reset,
-			result.Score, ipv6Str, authStr, reset)
+			r.Score, ipv6, auth)
 	}
 }
 
 func testProxy(proxyStr string, config Config) ProxyResult {
 	result := ProxyResult{
-		Proxy:     proxyStr,
+		Proxy:     strings.TrimSpace(proxyStr),
 		LatencyMs: -1,
+		CheckTime: time.Now().Format(time.RFC3339),
 	}
 
-	hasAuth, authUser, authPass := parseProxyAuth(proxyStr)
+	hasAuth, user, pass := parseProxyAuth(proxyStr)
 	result.HasAuth = hasAuth
 
 	cleanProxy := removeProxyAuth(proxyStr)
+	cleanProxy = strings.TrimPrefix(cleanProxy, "http://")
+	cleanProxy = strings.TrimPrefix(cleanProxy, "https://")
+	cleanProxy = strings.TrimPrefix(cleanProxy, "socks4://")
+	cleanProxy = strings.TrimPrefix(cleanProxy, "socks5://")
 
-	var proxyType string
-
-	if config.Types != "" {
-		types := strings.Split(config.Types, ",")
-		proxyType = strings.TrimSpace(types[0])
-	} else if config.AutoDetect {
-		detected, err := detectProxyTypeFast(cleanProxy, config)
-		if err == nil {
-			proxyType = detected
-		} else {
-			result.Error = err.Error()
-			return result
-		}
-	} else {
-		proxyType = detectProxyTypeByPort(cleanProxy)
-	}
-
+	proxyType := config.Types
 	if proxyType == "" {
-		result.Error = "Unable to detect proxy type"
-		return result
+		if config.AutoDetect {
+			detected, err := detectProxyType(cleanProxy, config)
+			if err == nil {
+				proxyType = detected
+			}
+		}
+		if proxyType == "" {
+			proxyType = detectProxyTypeByPort(cleanProxy)
+		}
 	}
-
+	if proxyType == "" {
+		proxyType = "http"
+	}
 	result.Type = proxyType
 
 	proxyWithAuth := cleanProxy
 	if hasAuth {
-		if proxyType == "socks5" || proxyType == "http" || proxyType == "https" {
-			proxyWithAuth = fmt.Sprintf("%s://%s:%s@%s", proxyType, authUser, authPass, cleanProxy)
-		}
+		proxyWithAuth = fmt.Sprintf("%s://%s:%s@%s", proxyType, user, pass, cleanProxy)
 	}
 
 	start := time.Now()
-	working, _, err := checkProxyReal(proxyWithAuth, proxyType, config.TestURL, config.Timeout)
-	latency := time.Since(start).Milliseconds()
+	working, _, err := checkProxy(proxyWithAuth, proxyType, config.TestURL, config.Timeout, config.Insecure)
+	result.LatencyMs = time.Since(start).Milliseconds()
 
 	if err != nil || !working {
 		if err != nil {
@@ -416,60 +447,51 @@ func testProxy(proxyStr string, config Config) ProxyResult {
 	}
 
 	result.Working = true
-	result.LatencyMs = latency
-
 	result.IPv6 = checkIPv6(cleanProxy)
-
-	result.Country, result.Provider = getProxyGeoIP(cleanProxy)
-	result.Anonymity = checkAnonymityReal(proxyWithAuth, proxyType, config.TestURL, config.Timeout)
-	result.Speed = getSpeedCategory(latency)
-	result.Score = calculateProxyScore(result, config)
+	result.Country, result.Provider = getGeoInfo(cleanProxy)
+	result.Anonymity = checkAnonymity(proxyWithAuth, proxyType, config.TestURL, config.Timeout)
+	result.Speed = getSpeedCategory(result.LatencyMs)
+	result.Score = calculateScore(result, config)
 
 	return result
 }
 
 func parseProxyAuth(proxyStr string) (bool, string, string) {
-	matches := authRegex.FindStringSubmatch(proxyStr)
-	if len(matches) == 4 {
-		return true, matches[2], matches[3]
+	m := authRegex.FindStringSubmatch(strings.TrimSpace(proxyStr))
+	if len(m) == 4 {
+		return true, m[1], m[2]
 	}
 	return false, "", ""
 }
 
 func removeProxyAuth(proxyStr string) string {
-	return authRegex.ReplaceAllString(proxyStr, "")
+	m := authRegex.FindStringSubmatch(strings.TrimSpace(proxyStr))
+	if len(m) == 4 {
+		return m[3]
+	}
+	return proxyStr
 }
 
 func checkIPv6(proxyStr string) bool {
-	proxyStr = proxyTypeRegex.ReplaceAllString(proxyStr, "")
-	if strings.Contains(proxyStr, "[") && strings.Contains(proxyStr, "]") {
-		return true
-	}
 	host, _, err := net.SplitHostPort(proxyStr)
 	if err != nil {
-		return strings.Contains(proxyStr, ":")
+		return strings.Count(proxyStr, ":") >= 2
 	}
-	return strings.Contains(host, ":")
+	return strings.Count(host, ":") >= 2
 }
 
-func detectProxyTypeFast(proxyStr string, config Config) (string, error) {
-	types := []string{"http", "socks5", "socks4"}
-
+func detectProxyType(proxyStr string, config Config) (string, error) {
+	types := []string{"socks5", "socks4", "https", "http"}
 	for _, t := range types {
-		working, _, _ := checkProxyReal(proxyStr, t, config.TestURL, 1)
+		working, _, _ := checkProxy(proxyStr, t, config.TestURL, 1, config.Insecure)
 		if working {
 			return t, nil
 		}
 	}
-
 	return "", fmt.Errorf("unable to detect proxy type")
 }
 
 func detectProxyTypeByPort(proxyStr string) string {
-	if match := proxyTypeRegex.FindString(proxyStr); match != "" {
-		return strings.TrimSuffix(match, "://")
-	}
-
 	host, portStr, err := net.SplitHostPort(proxyStr)
 	if err != nil {
 		return "http"
@@ -482,77 +504,76 @@ func detectProxyTypeByPort(proxyStr string) string {
 	}
 
 	switch port {
-	case 1080:
+	case 1080, 1081, 1085, 9050, 9051, 9150:
 		return "socks5"
-	case 1081:
-		return "socks4"
-	case 8080, 3128, 8888, 80:
+	case 8080, 3128, 8888, 80, 8000:
 		return "http"
-	case 443, 8443:
+	case 443, 8443, 9443:
 		return "https"
+	default:
+		return "http"
 	}
-
-	return "http"
 }
 
-func checkProxyReal(proxyStr, proxyType, testURL string, timeoutSec int) (bool, int, error) {
+func checkProxy(proxyStr, proxyType, testURL string, timeoutSec int, insecure bool) (bool, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	var client *http.Client
-	var err error
-
-	switch proxyType {
-	case "http":
-		client, err = createHTTPClient(proxyStr, timeoutSec)
-	case "https":
-		client, err = createHTTPSClient(proxyStr, timeoutSec)
-	case "socks4":
-		client, err = createSocks4Client(proxyStr, testURL, timeoutSec)
-	case "socks5":
-		client, err = createSocks5Client(proxyStr, timeoutSec)
-	default:
-		return false, 0, fmt.Errorf("unsupported proxy type: %s", proxyType)
-	}
-
+	client, err := createClient(proxyStr, proxyType, timeoutSec, insecure)
 	if err != nil {
 		return false, 0, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
-	if err != nil {
-		return false, 0, err
-	}
-	req.Header.Set("User-Agent", userAgents[0])
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Connection", "keep-alive")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, 0, err
-	}
-	defer resp.Body.Close()
-
-	statusCode := resp.StatusCode
-
-	if statusCode >= 200 && statusCode < 400 {
-		return true, statusCode, nil
+	testURLs := []string{
+		testURL,
+		"https://www.google.com/generate_204",
+		"https://cloudflare.com/cdn-cgi/trace",
+		"https://httpbin.org/get",
 	}
 
-	if statusCode == 403 || statusCode == 404 || statusCode == 429 {
-		return true, statusCode, nil
+	var lastErr error
+	for _, u := range testURLs {
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", userAgents[0])
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+		req.Header.Set("Connection", "keep-alive")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode < 400 {
+			return true, resp.StatusCode, nil
+		}
+		lastErr = fmt.Errorf("status code %d", resp.StatusCode)
 	}
 
-	if statusCode == 301 || statusCode == 302 || statusCode == 307 || statusCode == 308 {
-		return true, statusCode, nil
-	}
-
-	return false, statusCode, fmt.Errorf("status code: %d", statusCode)
+	return false, 0, lastErr
 }
 
-func createHTTPClient(proxyStr string, timeout int) (*http.Client, error) {
+func createClient(proxyStr, proxyType string, timeout int, insecure bool) (*http.Client, error) {
+	switch proxyType {
+	case "http", "https":
+		return createHTTPClient(proxyStr, timeout, insecure)
+	case "socks5":
+		return createSocks5Client(proxyStr, timeout)
+	case "socks4":
+		return createSocks4Client(proxyStr, timeout)
+	default:
+		return nil, fmt.Errorf("unsupported proxy type: %s", proxyType)
+	}
+}
+
+func createHTTPClient(proxyStr string, timeout int, insecure bool) (*http.Client, error) {
 	if !strings.HasPrefix(proxyStr, "http://") && !strings.HasPrefix(proxyStr, "https://") {
 		proxyStr = "http://" + proxyStr
 	}
@@ -564,145 +585,18 @@ func createHTTPClient(proxyStr string, timeout int) (*http.Client, error) {
 
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
 		DialContext: (&net.Dialer{
 			Timeout:   time.Duration(timeout) * time.Second,
-			KeepAlive: 0,
+			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     30 * time.Second,
-	}
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   time.Duration(timeout) * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
-	}, nil
-}
-
-func createHTTPSClient(proxyStr string, timeout int) (*http.Client, error) {
-	if !strings.HasPrefix(proxyStr, "https://") {
-		proxyStr = "https://" + proxyStr
-	}
-
-	proxyURL, err := url.Parse(proxyStr)
-	if err != nil {
-		return nil, err
-	}
-
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: insecure,
 		},
-		DialContext: (&net.Dialer{
-			Timeout:   time.Duration(timeout) * time.Second,
-			KeepAlive: 0,
-		}).DialContext,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     30 * time.Second,
-	}
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   time.Duration(timeout) * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
-	}, nil
-}
-
-func createSocks4Client(proxyStr, testURL string, timeout int) (*http.Client, error) {
-	proxyStr = strings.TrimPrefix(proxyStr, "socks4://")
-
-	host, portStr, err := net.SplitHostPort(proxyStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid socks4 proxy format: %v", err)
-	}
-	proxyPort, _ := strconv.Atoi(portStr)
-
-	parsedURL, err := url.Parse(testURL)
-	if err != nil {
-		return nil, err
-	}
-	targetHost := parsedURL.Hostname()
-	targetPort := parsedURL.Port()
-	if targetPort == "" {
-		if parsedURL.Scheme == "https" {
-			targetPort = "443"
-		} else {
-			targetPort = "80"
-		}
-	}
-
-	targetIP, err := net.ResolveIPAddr("ip", targetHost)
-	if err != nil {
-		targetIP = &net.IPAddr{IP: net.ParseIP("1.2.3.4")}
-	}
-
-	targetPortInt, _ := strconv.Atoi(targetPort)
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dialer := &net.Dialer{Timeout: time.Duration(timeout) * time.Second}
-			conn, err := dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", host, proxyPort))
-			if err != nil {
-				return nil, err
-			}
-
-			ipBytes := targetIP.IP.To4()
-			if ipBytes == nil {
-				conn.Close()
-				return nil, fmt.Errorf("invalid target IP")
-			}
-
-			request := []byte{
-				0x04, 0x01,
-				byte(targetPortInt >> 8), byte(targetPortInt & 0xFF),
-				ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3],
-				0x00,
-			}
-
-			conn.SetWriteDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
-			_, err = conn.Write(request)
-			if err != nil {
-				conn.Close()
-				return nil, err
-			}
-
-			buf := make([]byte, 8)
-			conn.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
-			_, err = conn.Read(buf)
-			if err != nil {
-				conn.Close()
-				return nil, err
-			}
-
-			if len(buf) < 2 || buf[1] != 0x5A {
-				conn.Close()
-				return nil, fmt.Errorf("socks4 handshake failed")
-			}
-
-			return conn, nil
-		},
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
 	}
 
 	return &http.Client{
@@ -718,19 +612,13 @@ func createSocks4Client(proxyStr, testURL string, timeout int) (*http.Client, er
 }
 
 func createSocks5Client(proxyStr string, timeout int) (*http.Client, error) {
-	proxyStr = strings.TrimPrefix(proxyStr, "socks5://")
-
-	host, portStr, err := net.SplitHostPort(proxyStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid socks5 proxy format: %v", err)
-	}
-	port, _ := strconv.Atoi(portStr)
-
 	var auth *proxy.Auth
+
 	if strings.Contains(proxyStr, "@") {
-		parts := strings.Split(proxyStr, "@")
+		parts := strings.SplitN(proxyStr, "@", 2)
 		if len(parts) == 2 {
-			userPass := strings.Split(parts[0], ":")
+			proxyStr = parts[1]
+			userPass := strings.SplitN(parts[0], ":", 2)
 			if len(userPass) == 2 {
 				auth = &proxy.Auth{
 					User:     userPass[0],
@@ -740,7 +628,16 @@ func createSocks5Client(proxyStr string, timeout int) (*http.Client, error) {
 		}
 	}
 
-	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", host, port), auth, proxy.Direct)
+	proxyStr = strings.TrimPrefix(proxyStr, "socks5://")
+
+	host, portStr, err := net.SplitHostPort(proxyStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid socks5 proxy format: %v", err)
+	}
+
+	port, _ := strconv.Atoi(portStr)
+
+	dialer, err := proxy.SOCKS5("tcp", net.JoinHostPort(host, strconv.Itoa(port)), auth, proxy.Direct)
 	if err != nil {
 		return nil, err
 	}
@@ -752,9 +649,11 @@ func createSocks5Client(proxyStr string, timeout int) (*http.Client, error) {
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
 	}
 
 	return &http.Client{
@@ -769,46 +668,115 @@ func createSocks5Client(proxyStr string, timeout int) (*http.Client, error) {
 	}, nil
 }
 
-func checkAnonymityReal(proxyStr, proxyType, testURL string, timeout int) string {
+func createSocks4Client(proxyStr string, timeout int) (*http.Client, error) {
+	proxyStr = strings.TrimPrefix(proxyStr, "socks4://")
+
+	host, portStr, err := net.SplitHostPort(proxyStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid socks4 proxy: %v", err)
+	}
+	proxyPort, _ := strconv.Atoi(portStr)
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{Timeout: time.Duration(timeout) * time.Second}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(host, strconv.Itoa(proxyPort)))
+			if err != nil {
+				return nil, err
+			}
+
+			targetHost, targetPort, err := net.SplitHostPort(addr)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			targetIP, err := net.ResolveIPAddr("ip", targetHost)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			ipBytes := targetIP.IP.To4()
+			if ipBytes == nil {
+				conn.Close()
+				return nil, fmt.Errorf("socks4 requires IPv4 target")
+			}
+
+			targetPortInt, _ := strconv.Atoi(targetPort)
+			if targetPortInt < 0 || targetPortInt > 65535 {
+				conn.Close()
+				return nil, fmt.Errorf("invalid target port")
+			}
+
+			request := []byte{
+				0x04, 0x01,
+				byte(targetPortInt >> 8), byte(targetPortInt & 0xFF),
+				ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3],
+				0x00,
+			}
+
+			conn.SetWriteDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
+			if _, err := conn.Write(request); err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			buf := make([]byte, 8)
+			conn.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			if len(buf) < 2 || buf[1] != 0x5A {
+				conn.Close()
+				return nil, fmt.Errorf("socks4 handshake failed")
+			}
+
+			return conn, nil
+		},
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   time.Duration(timeout) * time.Second,
+	}, nil
+}
+
+func checkAnonymity(proxyStr, proxyType, testURL string, timeout int) string {
+	key := proxyType + "|" + proxyStr
+
 	anonymityMu.Lock()
-	if val, ok := anonymityCache[proxyStr]; ok {
+	if val, ok := anonymityCache[key]; ok {
 		anonymityMu.Unlock()
 		return val
 	}
 	anonymityMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
-	defer cancel()
-
-	var client *http.Client
-	var err error
-
-	switch proxyType {
-	case "http":
-		client, err = createHTTPClient(proxyStr, timeout)
-	case "https":
-		client, err = createHTTPSClient(proxyStr, timeout)
-	case "socks4":
-		client, err = createSocks4Client(proxyStr, "https://httpbin.org", timeout)
-	case "socks5":
-		client, err = createSocks5Client(proxyStr, timeout)
-	default:
-		return "unknown"
-	}
-
+	client, err := createClient(proxyStr, proxyType, timeout, true)
 	if err != nil {
 		return "unknown"
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
+
 	testURLs := []string{
 		"https://httpbin.org/headers",
-		"https://api.ipify.org?format=json",
 		"https://httpbin.org/get",
 	}
 
-	var anonymity string
-	for _, url := range testURLs {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	for _, u := range testURLs {
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 		if err != nil {
 			continue
 		}
@@ -836,95 +804,93 @@ func checkAnonymityReal(proxyStr, proxyType, testURL string, timeout int) string
 		}
 
 		if _, ok := headers["X-Forwarded-For"]; ok {
-			anonymity = "transparent"
-		} else if _, ok := headers["X-Real-IP"]; ok {
-			anonymity = "transparent"
-		} else if _, ok := headers["Forwarded"]; ok {
-			anonymity = "transparent"
-		} else if _, ok := headers["Via"]; ok {
-			anonymity = "anonymous"
-		} else if _, ok := headers["Client-IP"]; ok {
-			anonymity = "transparent"
-		} else {
-			anonymity = "elite"
+			anonymityMu.Lock()
+			anonymityCache[key] = "transparent"
+			anonymityMu.Unlock()
+			return "transparent"
 		}
-
-		if anonymity != "" {
-			break
+		if _, ok := headers["X-Real-IP"]; ok {
+			anonymityMu.Lock()
+			anonymityCache[key] = "transparent"
+			anonymityMu.Unlock()
+			return "transparent"
 		}
-	}
-
-	if anonymity == "" {
-		anonymity = "unknown"
+		if _, ok := headers["Via"]; ok {
+			anonymityMu.Lock()
+			anonymityCache[key] = "anonymous"
+			anonymityMu.Unlock()
+			return "anonymous"
+		}
 	}
 
 	anonymityMu.Lock()
-	anonymityCache[proxyStr] = anonymity
+	anonymityCache[key] = "elite"
 	anonymityMu.Unlock()
-
-	return anonymity
+	return "elite"
 }
 
-func getProxyGeoIP(proxyStr string) (string, string) {
-	proxyStr = proxyTypeRegex.ReplaceAllString(proxyStr, "")
-
+func getGeoInfo(proxyStr string) (string, string) {
 	host, _, err := net.SplitHostPort(proxyStr)
 	if err != nil {
-		return "", ""
+		host = strings.Trim(proxyStr, "[]")
 	}
-	ip := host
 
-	if ip == "localhost" || ip == "127.0.0.1" {
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return "Local", "Local"
 	}
 
 	geoCacheMu.Lock()
-	if info, ok := geoCache[ip]; ok {
+	if info, ok := geoCache[host]; ok {
 		geoCacheMu.Unlock()
 		return info.Country, info.Provider
 	}
 	geoCacheMu.Unlock()
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	apis := []string{
-		"http://ip-api.com/json/%s?fields=countryCode,isp",
-		"https://ipwhois.app/json/%s",
-		"https://ipinfo.io/%s/json",
-	}
+	client := &http.Client{Timeout: 5 * time.Second}
 
 	var country, provider string
-	for _, api := range apis {
-		url := fmt.Sprintf(api, ip)
-		resp, err := client.Get(url)
-		if err != nil {
-			continue
-		}
 
+	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=countryCode,isp", host)
+	resp, err := client.Get(url)
+	if err == nil {
 		var data map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			resp.Body.Close()
-			continue
+		if json.NewDecoder(resp.Body).Decode(&data) == nil {
+			if status, ok := data["status"].(string); ok && status == "success" {
+				country, _ = data["countryCode"].(string)
+				provider, _ = data["isp"].(string)
+			}
 		}
 		resp.Body.Close()
+	}
 
-		if strings.Contains(api, "ip-api") {
-			country, _ = data["countryCode"].(string)
-			provider, _ = data["isp"].(string)
-		} else if strings.Contains(api, "ipwhois") {
-			country, _ = data["country"].(string)
-			provider, _ = data["isp"].(string)
-		} else if strings.Contains(api, "ipinfo") {
-			country, _ = data["country"].(string)
-			provider, _ = data["org"].(string)
+	if country == "" && provider == "" {
+		url := fmt.Sprintf("https://ipinfo.io/%s/json", host)
+		resp, err := client.Get(url)
+		if err == nil {
+			var data map[string]interface{}
+			if json.NewDecoder(resp.Body).Decode(&data) == nil {
+				country, _ = data["country"].(string)
+				provider, _ = data["org"].(string)
+			}
+			resp.Body.Close()
 		}
+	}
 
-		if country != "" || provider != "" {
-			break
+	if country == "" && provider == "" {
+		url := fmt.Sprintf("https://ipwhois.app/json/%s", host)
+		resp, err := client.Get(url)
+		if err == nil {
+			var data map[string]interface{}
+			if json.NewDecoder(resp.Body).Decode(&data) == nil {
+				country, _ = data["country"].(string)
+				provider, _ = data["isp"].(string)
+			}
+			resp.Body.Close()
 		}
 	}
 
 	geoCacheMu.Lock()
-	geoCache[ip] = GeoInfo{Country: country, Provider: provider}
+	geoCache[host] = GeoInfo{Country: country, Provider: provider}
 	geoCacheMu.Unlock()
 
 	return country, provider
@@ -939,17 +905,17 @@ func getSpeedCategory(latency int64) string {
 	return "slow"
 }
 
-func calculateProxyScore(result ProxyResult, config Config) int {
+func calculateScore(result ProxyResult, config Config) int {
 	score := 0
 
 	if result.LatencyMs < 100 {
-		score += 25
+		score += 30
 	} else if result.LatencyMs < 300 {
-		score += 18
+		score += 22
 	} else if result.LatencyMs < 500 {
-		score += 10
+		score += 14
 	} else if result.LatencyMs < 1000 {
-		score += 5
+		score += 6
 	}
 
 	switch result.Type {
@@ -975,104 +941,194 @@ func calculateProxyScore(result ProxyResult, config Config) int {
 	if result.IPv6 {
 		score += 5
 	}
-
 	if result.HasAuth {
 		score += 3
 	}
-
 	if result.Country != "" && result.Country != "Unknown" {
 		score += 2
 	}
-
-	if result.Provider != "" && result.Provider != "Local" {
+	if result.Provider != "" && result.Provider != "Unknown" {
 		score += 2
 	}
 
 	if score > 100 {
 		score = 100
 	}
-
 	return score
 }
 
+func saveValidProxy(proxy string) {
+	validProxyMu.Lock()
+	defer validProxyMu.Unlock()
+
+	f, err := os.OpenFile("valid_proxies.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.WriteString(proxy + "\n")
+}
+
+func saveJSON(results []ProxyResult) {
+	f, err := os.Create("proxy_results.json")
+	if err != nil {
+		fmt.Println("Error creating JSON:", err)
+		return
+	}
+	defer f.Close()
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	enc.Encode(results)
+	fmt.Println("\nResults saved to proxy_results.json")
+}
+
+func printSummary(results []ProxyResult, config Config) {
+	if len(results) == 0 {
+		fmt.Println("\nNo working proxies found")
+		return
+	}
+
+	var totalScore, totalLatency int64
+	for _, r := range results {
+		totalScore += int64(r.Score)
+		totalLatency += r.LatencyMs
+	}
+
+	avgScore := totalScore / int64(len(results))
+	avgLatency := totalLatency / int64(len(results))
+
+	fmt.Println("\n========================================")
+	fmt.Printf("Total Proxies in File: %d\n", totalProxies)
+	fmt.Printf("Working Proxies: %d\n", len(results))
+	if totalProxies > 0 {
+		fmt.Printf("Success Rate: %.1f%%\n", float64(len(results))/float64(totalProxies)*100)
+	}
+	fmt.Printf("Average Latency: %dms\n", avgLatency)
+	fmt.Printf("Average Score: %d/100\n", avgScore)
+	fmt.Printf("Best Proxy: %s (%dms)\n", results[0].Proxy, results[0].LatencyMs)
+	fmt.Println("========================================")
+}
+
+func printRecommendation(results []ProxyResult, config Config) {
+	if len(results) == 0 {
+		fmt.Println("\nNo working proxies found to recommend")
+		return
+	}
+
+	sorted := make([]ProxyResult, len(results))
+	copy(sorted, results)
+	sortResults(sorted, config)
+	best := sorted[0]
+
+	fmt.Println("\n========================================")
+	fmt.Println("RECOMMENDED PROXY CONFIGURATION")
+	fmt.Printf("Proxy: %s\n", best.Proxy)
+	fmt.Printf("Type: %s\n", best.Type)
+	fmt.Printf("Latency: %dms\n", best.LatencyMs)
+	fmt.Printf("Anonymity: %s\n", best.Anonymity)
+	fmt.Printf("Speed: %s\n", best.Speed)
+	fmt.Printf("IPv6: %v\n", best.IPv6)
+	fmt.Printf("Auth: %v\n", best.HasAuth)
+	fmt.Printf("Score: %d/100\n", best.Score)
+	fmt.Println("========================================")
+}
+
 func downloadProxies(config Config) {
-	urls := map[string]string{
-		"socks5": "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks5.txt",
-		"socks4": "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks4.txt",
-		"https":  "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt",
-		"http":   "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/http.txt",
+	sources := map[string][]string{
+		"socks5": {
+			"https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks5.txt",
+			"https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/socks5-proxy-list-by-EbraSha.txt",
+			"https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt",
+		},
+		"socks4": {
+			"https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks4.txt",
+			"https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/socks4-proxy-list-by-EbraSha.txt",
+		},
+		"https": {
+			"https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt",
+			"https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/https-proxy-list-by-EbraSha.txt",
+			"https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+		},
+		"http": {
+			"https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/http.txt",
+			"https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/http-proxy-list-by-EbraSha.txt",
+			"https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt",
+		},
 	}
 
-	extraUrls := map[string]string{
-		"socks5_ebrasha": "https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/socks5-proxy-list-by-EbraSha.txt",
-		"socks4_ebrasha": "https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/socks4-proxy-list-by-EbraSha.txt",
-		"https_ebrasha":  "https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/https-proxy-list-by-EbraSha.txt",
-		"http_ebrasha":   "https://raw.githubusercontent.com/ebrasha/abdal-proxy-hub/main/http-proxy-list-by-EbraSha.txt",
-	}
-
-	var proxyType string
-	if config.ProxyType != "" {
-		proxyType = config.ProxyType
-	} else {
+	proxyType := config.ProxyType
+	if proxyType == "" {
 		proxyType = "all"
 	}
 
-	fmt.Printf("Downloading proxies...\n")
+	fmt.Printf("Downloading proxies (type: %s)...\n", proxyType)
 
 	var allProxies []string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
-	if proxyType == "all" || proxyType == "socks5" {
-		allProxies = append(allProxies, fetchURL(urls["socks5"])...)
-		allProxies = append(allProxies, fetchURL(extraUrls["socks5_ebrasha"])...)
+	for t, urls := range sources {
+		if proxyType != "all" && proxyType != t {
+			continue
+		}
+
+		for _, url := range urls {
+			wg.Add(1)
+			go func(url, typ string) {
+				defer wg.Done()
+				proxies := fetchProxies(url)
+				if len(proxies) > 0 {
+					mu.Lock()
+					for _, p := range proxies {
+						if !strings.Contains(p, "://") {
+							p = typ + "://" + p
+						}
+						allProxies = append(allProxies, p)
+					}
+					mu.Unlock()
+					fmt.Printf("  Downloaded %d proxies from %s\n", len(proxies), url)
+				}
+			}(url, t)
+		}
 	}
-	if proxyType == "all" || proxyType == "socks4" {
-		allProxies = append(allProxies, fetchURL(urls["socks4"])...)
-		allProxies = append(allProxies, fetchURL(extraUrls["socks4_ebrasha"])...)
-	}
-	if proxyType == "all" || proxyType == "https" {
-		allProxies = append(allProxies, fetchURL(urls["https"])...)
-		allProxies = append(allProxies, fetchURL(extraUrls["https_ebrasha"])...)
-	}
-	if proxyType == "all" || proxyType == "http" {
-		allProxies = append(allProxies, fetchURL(urls["http"])...)
-		allProxies = append(allProxies, fetchURL(extraUrls["http_ebrasha"])...)
-	}
+
+	wg.Wait()
 
 	if len(allProxies) == 0 {
 		fmt.Println("No proxies downloaded")
 		return
 	}
 
-	unique := make(map[string]bool)
-	var result []string
-	for _, p := range allProxies {
-		if !unique[p] {
-			unique[p] = true
-			result = append(result, p)
-		}
+	allProxies = uniqueStrings(allProxies)
+
+	filename := "proxies.txt"
+	if proxyType != "all" {
+		filename = proxyType + "_proxies.txt"
 	}
 
-	filename := fmt.Sprintf("%s_proxies.txt", proxyType)
-	if proxyType == "all" {
-		filename = "all_proxies.txt"
-	}
-
-	file, err := os.Create(filename)
+	f, err := os.Create(filename)
 	if err != nil {
-		fmt.Println("Error creating file:", err)
+		fmt.Printf("Error creating file: %v\n", err)
 		return
 	}
-	defer file.Close()
+	defer f.Close()
 
-	for _, p := range result {
-		file.WriteString(p + "\n")
+	for _, p := range allProxies {
+		f.WriteString(p + "\n")
 	}
 
-	fmt.Printf("✓ Downloaded %d proxies to %s\n", len(result), filename)
+	fmt.Printf("\nDownloaded %d proxies to %s\n", len(allProxies), filename)
 }
 
-func fetchURL(urlStr string) []string {
-	client := getHTTPClient()
+func fetchProxies(urlStr string) []string {
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
 	resp, err := client.Get(urlStr)
 	if err != nil {
 		return nil
@@ -1086,48 +1142,45 @@ func fetchURL(urlStr string) []string {
 
 	lines := strings.Split(string(body), "\n")
 	var proxies []string
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+		if line != "" && !strings.HasPrefix(line, "#") {
+			proxies = append(proxies, line)
 		}
-		proxies = append(proxies, line)
 	}
-
 	return proxies
 }
 
 func scrapeProxies(config Config) {
 	if config.ScrapeDeep {
-		fmt.Println("Deep scraping proxies from URL...")
+		fmt.Println("Deep scraping proxies...")
 	} else {
-		fmt.Println("Scraping proxies from URL...")
+		fmt.Println("Scraping proxies...")
+	}
+
+	args := flag.Args()
+	if len(args) == 0 {
+		fmt.Println("Please provide URLs to scrape")
+		fmt.Println("Example: program -scrape https://example.com/proxies.txt")
+		return
 	}
 
 	var allProxies []string
 	var mu sync.Mutex
-
-	args := flag.Args()
-	if len(args) == 0 {
-		fmt.Println("Please provide a URL to scrape")
-		fmt.Println("Example: ct.exe -proxy-scrape https://example.com/proxies.txt")
-		return
-	}
-
-	urls := args
-
 	var wg sync.WaitGroup
-	for _, url := range urls {
+
+	for _, url := range args {
 		wg.Add(1)
-		go func(url string) {
+		go func(u string) {
 			defer wg.Done()
-			proxies := scrapeURL(url, config.ScrapeDeep)
+			proxies := scrapeURL(u, config.ScrapeDeep)
 			mu.Lock()
 			allProxies = append(allProxies, proxies...)
 			mu.Unlock()
+			fmt.Printf("  Scraped %d proxies from %s\n", len(proxies), u)
 		}(url)
 	}
+
 	wg.Wait()
 
 	if len(allProxies) == 0 {
@@ -1135,134 +1188,95 @@ func scrapeProxies(config Config) {
 		return
 	}
 
-	unique := make(map[string]bool)
-	var result []string
-	for _, p := range allProxies {
-		if !unique[p] {
-			unique[p] = true
-			result = append(result, p)
-		}
-	}
+	allProxies = uniqueStrings(allProxies)
 
 	filename := "scraped_proxies.txt"
-	file, err := os.Create(filename)
+	if config.ScrapeDeep {
+		filename = "deep_scraped_proxies.txt"
+	}
+
+	f, err := os.Create(filename)
 	if err != nil {
-		fmt.Println("Error creating file:", err)
+		fmt.Printf("Error creating file: %v\n", err)
 		return
 	}
-	defer file.Close()
+	defer f.Close()
 
-	for _, p := range result {
-		file.WriteString(p + "\n")
+	for _, p := range allProxies {
+		f.WriteString(p + "\n")
 	}
 
-	fmt.Printf("✓ Scraped %d proxies to %s\n", len(result), filename)
+	fmt.Printf("\nScraped %d proxies to %s\n", len(allProxies), filename)
 }
 
 func scrapeURL(urlStr string, deep bool) []string {
-	client := getHTTPClient()
-	var proxies []string
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 
 	resp, err := client.Get(urlStr)
 	if err != nil {
-		fmt.Printf("Error fetching %s: %v\n", urlStr, err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Printf("Error reading %s: %v\n", urlStr, err)
 		return nil
 	}
 
 	content := string(body)
+	var proxies []string
 
-	if strings.Contains(urlStr, "freeproxy.world") {
-		proxyType := "socks4"
-		if strings.Contains(urlStr, "type=socks5") {
-			proxyType = "socks5"
-		} else if strings.Contains(urlStr, "type=https") {
-			proxyType = "https"
-		} else if strings.Contains(urlStr, "type=http") {
-			proxyType = "http"
+	matches := proxyRegex.FindAllString(content, -1)
+	for _, m := range matches {
+		m = strings.TrimSpace(m)
+		if m != "" && !strings.HasPrefix(m, "#") {
+			proxies = append(proxies, m)
 		}
+	}
 
-		proxies = scrapeFreeproxyWorld(content, proxyType)
+	ips := ipRegex.FindAllString(content, -1)
+	ports := portRegex.FindAllString(content, -1)
 
-		if deep {
-			maxPage := findMaxPage(content)
-			baseURL := strings.Split(urlStr, "&page=")[0]
-			if maxPage > 1 {
-				fmt.Printf("Found %d pages, scraping all...\n", maxPage)
-				var wg sync.WaitGroup
-				var mu sync.Mutex
-
-				for page := 2; page <= maxPage && page <= 50; page++ {
-					wg.Add(1)
-					go func(page int) {
-						defer wg.Done()
-						pageURL := fmt.Sprintf("%s&page=%d", baseURL, page)
-						fmt.Printf("Scraping page %d...\n", page)
-						moreProxies := scrapeURL(pageURL, false)
-						mu.Lock()
-						proxies = append(proxies, moreProxies...)
-						mu.Unlock()
-					}(page)
-				}
-				wg.Wait()
-			}
+	if len(ips) > 0 && len(ports) > 0 {
+		minLen := len(ips)
+		if len(ports) < minLen {
+			minLen = len(ports)
 		}
-	} else {
-		matches := proxyRegex.FindAllString(content, -1)
-		for _, match := range matches {
-			match = strings.TrimSpace(match)
-			if match != "" && !strings.HasPrefix(match, "#") {
-				proxies = append(proxies, match)
-			}
-		}
-
-		ips := ipRegex.FindAllString(content, -1)
-		ipv6s := ipv6Regex.FindAllString(content, -1)
-		ports := portRegex.FindAllString(content, -1)
-
-		if len(ips) > 0 && len(ports) > 0 {
-			portIdx := 0
-			for _, ip := range ips {
-				if portIdx < len(ports) {
-					port := ports[portIdx]
-					if len(port) >= 2 && len(port) <= 5 {
-						proxy := ip + ":" + port
-						if !contains(proxies, proxy) {
-							proxies = append(proxies, proxy)
-						}
-						portIdx++
-					}
+		for i := 0; i < minLen; i++ {
+			port := ports[i]
+			if len(port) >= 2 && len(port) <= 5 {
+				proxy := ips[i] + ":" + port
+				if !contains(proxies, proxy) {
+					proxies = append(proxies, proxy)
 				}
 			}
 		}
+	}
 
-		if len(ipv6s) > 0 && len(ports) > 0 {
-			portIdx := 0
-			for _, ipv6 := range ipv6s {
-				if portIdx < len(ports) {
-					port := ports[portIdx]
-					if len(port) >= 2 && len(port) <= 5 {
-						proxy := "[" + ipv6 + "]:" + port
-						if !contains(proxies, proxy) {
-							proxies = append(proxies, proxy)
-						}
-						portIdx++
-					}
+	ipv6s := ipv6Regex.FindAllString(content, -1)
+	if len(ipv6s) > 0 && len(ports) > 0 {
+		minLen := len(ipv6s)
+		if len(ports) < minLen {
+			minLen = len(ports)
+		}
+		for i := 0; i < minLen; i++ {
+			port := ports[i]
+			if len(port) >= 2 && len(port) <= 5 {
+				proxy := "[" + ipv6s[i] + "]:" + port
+				if !contains(proxies, proxy) {
+					proxies = append(proxies, proxy)
 				}
 			}
 		}
 	}
 
 	if deep {
-		linkRegex := regexp.MustCompile(`https?://[^\s"']+`)
 		links := linkRegex.FindAllString(content, -1)
-
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 
@@ -1270,11 +1284,11 @@ func scrapeURL(urlStr string, deep bool) []string {
 			if strings.Contains(link, ".txt") || strings.Contains(link, "raw.githubusercontent.com") {
 				if !strings.Contains(link, urlStr) {
 					wg.Add(1)
-					go func(link string) {
+					go func(l string) {
 						defer wg.Done()
-						moreProxies := scrapeURL(link, false)
+						more := scrapeURL(l, false)
 						mu.Lock()
-						proxies = append(proxies, moreProxies...)
+						proxies = append(proxies, more...)
 						mu.Unlock()
 					}(link)
 				}
@@ -1283,85 +1297,7 @@ func scrapeURL(urlStr string, deep bool) []string {
 		wg.Wait()
 	}
 
-	return proxies
-}
-
-func scrapeFreeproxyWorld(content, proxyType string) []string {
-	var proxies []string
-	lines := strings.Split(content, "\n")
-
-	ipPattern := regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
-
-	var ips []string
-	var ports []string
-
-	for _, line := range lines {
-		if strings.Contains(line, "<td") && strings.Contains(line, "style") {
-			continue
-		}
-		if strings.Contains(line, "<a href=") && strings.Contains(line, "port=") {
-			portMatch := regexp.MustCompile(`port=(\d+)`).FindStringSubmatch(line)
-			if len(portMatch) > 1 {
-				ports = append(ports, portMatch[1])
-			}
-		}
-	}
-
-	for _, line := range lines {
-		if ipPattern.MatchString(line) {
-			ips = append(ips, ipPattern.FindString(line))
-		}
-	}
-
-	if len(ips) > 0 && len(ports) > 0 {
-		minLen := len(ips)
-		if len(ports) < minLen {
-			minLen = len(ports)
-		}
-		for i := 0; i < minLen; i++ {
-			proxy := ips[i] + ":" + ports[i]
-			if !contains(proxies, proxy) {
-				if proxyType != "" && proxyType != "all" {
-					proxies = append(proxies, proxyType+"://"+proxy)
-				} else {
-					proxies = append(proxies, proxy)
-				}
-			}
-		}
-	}
-
-	return proxies
-}
-
-func findMaxPage(content string) int {
-	pageRegex := regexp.MustCompile(`/page=(\d+)`)
-	matches := pageRegex.FindAllStringSubmatch(content, -1)
-
-	maxPage := 1
-	for _, match := range matches {
-		if len(match) > 1 {
-			page, _ := strconv.Atoi(match[1])
-			if page > maxPage {
-				maxPage = page
-			}
-		}
-	}
-
-	if maxPage == 1 {
-		badgeRegex := regexp.MustCompile(`Found\s+(\d+)\s+proxies`)
-		badgeMatch := badgeRegex.FindStringSubmatch(content)
-		if len(badgeMatch) > 1 {
-			total, _ := strconv.Atoi(badgeMatch[1])
-			if total > 0 {
-				maxPage = (total / 50) + 1
-				if maxPage > 50 {
-					maxPage = 50
-				}
-			}
-		}
-	}
-
-	return maxPage
+	return uniqueStrings(proxies)
 }
 
 func contains(slice []string, item string) bool {
@@ -1373,51 +1309,37 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-func getHTTPClient() *http.Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 10 * time.Second,
-		}).DialContext,
-	}
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-	}
-}
-
 func findAndApplyBestProxy(config Config) string {
-	proxyList := []string{
-		"socks5://127.0.0.1:1080",
+	candidates := []string{
 		"http://127.0.0.1:8080",
+		"socks5://127.0.0.1:1080",
+		"http://127.0.0.1:3128",
 	}
 
-	fmt.Printf("Finding best proxy...\n\n")
+	fmt.Println("Finding best proxy...")
 
 	var results []ProxyResult
+	var mu sync.Mutex
 	var wg sync.WaitGroup
-	jobs := make(chan string, len(proxyList))
-	resultsMu := sync.Mutex{}
+	jobs := make(chan string, len(candidates))
 
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for proxy := range jobs {
-				result := testProxy(proxy, config)
-				resultsMu.Lock()
+			for p := range jobs {
+				result := testProxy(p, config)
 				if result.Working {
+					mu.Lock()
 					results = append(results, result)
+					mu.Unlock()
 				}
-				resultsMu.Unlock()
 			}
 		}()
 	}
 
-	for _, proxy := range proxyList {
-		jobs <- proxy
+	for _, p := range candidates {
+		jobs <- p
 	}
 	close(jobs)
 	wg.Wait()
@@ -1430,12 +1352,12 @@ func findAndApplyBestProxy(config Config) string {
 	sortResults(results, config)
 	best := results[0]
 
-	fmt.Printf("Best Proxy: %s\n", best.Proxy)
+	fmt.Printf("\nBest Proxy: %s\n", best.Proxy)
 	fmt.Printf("  Type: %s\n", best.Type)
 	fmt.Printf("  Latency: %dms\n", best.LatencyMs)
 	fmt.Printf("  Anonymity: %s\n", best.Anonymity)
 	fmt.Printf("  Speed: %s\n", best.Speed)
-	fmt.Printf("  Score: %d/100\n\n", best.Score)
+	fmt.Printf("  Score: %d/100\n", best.Score)
 
 	setSystemProxy(best.Proxy)
 	return best.Proxy
@@ -1449,15 +1371,15 @@ func setSystemProxy(proxyStr string) {
 		cmd := exec.Command("netsh", "winhttp", "set", "proxy", proxyStr)
 		if err := cmd.Run(); err != nil {
 			fmt.Println("Error setting proxy on Windows:", err)
-			fmt.Println("Try: Run as Administrator")
+			fmt.Println("Try running as Administrator")
 			return
 		}
-		fmt.Printf("✓ Proxy set to %s on Windows\n", proxyStr)
+		fmt.Printf("Proxy set to %s on Windows\n", proxyStr)
 	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		os.Setenv("HTTP_PROXY", proxyStr)
 		os.Setenv("HTTPS_PROXY", proxyStr)
 		os.Setenv("ALL_PROXY", proxyStr)
-		fmt.Printf("✓ Proxy set to %s via environment variables\n", proxyStr)
+		fmt.Printf("Proxy set to %s via environment variables\n", proxyStr)
 	} else {
 		fmt.Println("Proxy set successfully (simulated)")
 	}
@@ -1467,111 +1389,13 @@ func checkProxyStatus() {
 	fmt.Println("\nCurrent Proxy Settings:")
 	fmt.Println(strings.Repeat("-", 40))
 
-	httpProxy := os.Getenv("HTTP_PROXY")
-	httpsProxy := os.Getenv("HTTPS_PROXY")
-	allProxy := os.Getenv("ALL_PROXY")
-
-	fmt.Printf("HTTP_PROXY: %s\n", httpProxy)
-	fmt.Printf("HTTPS_PROXY: %s\n", httpsProxy)
-	fmt.Printf("ALL_PROXY: %s\n", allProxy)
+	fmt.Printf("HTTP_PROXY: %s\n", os.Getenv("HTTP_PROXY"))
+	fmt.Printf("HTTPS_PROXY: %s\n", os.Getenv("HTTPS_PROXY"))
+	fmt.Printf("ALL_PROXY: %s\n", os.Getenv("ALL_PROXY"))
 
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("netsh", "winhttp", "show", "proxy")
 		output, _ := cmd.Output()
 		fmt.Printf("\nWindows WinHTTP Proxy:\n%s\n", string(output))
 	}
-}
-
-func saveValidProxy(proxy string) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	file, err := os.OpenFile("valid_proxies.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	file.WriteString(proxy + "\n")
-}
-
-func saveJSON(results []ProxyResult) {
-	file, err := os.Create("proxy_results.json")
-	if err != nil {
-		fmt.Println("Error creating JSON:", err)
-		return
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	encoder.Encode(results)
-	fmt.Println("\nResults saved to proxy_results.json")
-}
-
-func printRecommendation(results []ProxyResult, config Config) {
-	if len(results) == 0 {
-		fmt.Println("\nNo working proxies found to recommend")
-		return
-	}
-
-	sorted := make([]ProxyResult, len(results))
-	copy(sorted, results)
-	sortResults(sorted, config)
-
-	best := sorted[0]
-
-	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
-	fmt.Printf("%s      RECOMMENDED PROXY CONFIGURATION%s\n", "\033[33m", "\033[0m")
-	fmt.Printf("%s========================================%s\n", "\033[32m", "\033[0m")
-
-	fmt.Printf("\nPrimary:   %s\n", best.Proxy)
-
-	fmt.Printf("\nReason:\n")
-	fmt.Printf("  • Type: %s\n", best.Type)
-	fmt.Printf("  • Latency: %dms\n", best.LatencyMs)
-	fmt.Printf("  • Anonymity: %s\n", best.Anonymity)
-	fmt.Printf("  • Speed: %s\n", best.Speed)
-	fmt.Printf("  • IPv6: %v\n", best.IPv6)
-	fmt.Printf("  • Auth: %v\n", best.HasAuth)
-	fmt.Printf("  • Score: %d/100\n", best.Score)
-
-	fmt.Printf("%s========================================%s\n", "\033[32m", "\033[0m")
-}
-
-func printSummary(results []ProxyResult, config Config) {
-	if len(results) == 0 {
-		fmt.Println("\nNo working proxies found")
-		return
-	}
-
-	var totalWorking int64
-	var totalScore int64
-	var avgLatency int64
-
-	for _, r := range results {
-		if r.Working {
-			totalWorking++
-			totalScore += int64(r.Score)
-			avgLatency += r.LatencyMs
-		}
-	}
-
-	avgScore := int64(0)
-	avgLatencyVal := int64(0)
-	if totalWorking > 0 {
-		avgScore = totalScore / totalWorking
-		avgLatencyVal = avgLatency / totalWorking
-	}
-
-	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
-	fmt.Printf("Total Proxies in File: %d\n", totalProxies)
-	fmt.Printf("Working Proxies: %d\n", totalWorking)
-	fmt.Printf("Success Rate: %.1f%%\n", float64(totalWorking)/float64(totalProxies)*100)
-	fmt.Printf("Average Latency: %dms\n", avgLatencyVal)
-	fmt.Printf("Average Score: %d/100\n", avgScore)
-	if len(results) > 0 {
-		fmt.Printf("Best Proxy: %s (%dms)\n", results[0].Proxy, results[0].LatencyMs)
-	}
-	fmt.Printf("========================================\n")
 }
