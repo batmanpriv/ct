@@ -23,31 +23,48 @@
 
 <img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
 
-## What's New in 1.2.2
+## What's New in 1.2.4
 
-### 🚀 Xray/V2Ray Config Checker
+### 🚀 Xray Config Checker Improvements
 
-- **Multi-Protocol Support** — VLESS, VMESS, Trojan, ShadowSocks
-- **Automatic Binary Management** — Downloads Xray core binary automatically
-- **Config Parsing** — Parse and test VLESS, VMESS, Trojan, and SS links
-- **GeoIP Detection** — Country, city, and ISP identification for each server
-- **HTTP Verification** — Optional HTTP request test through proxy
-- **Config Scraping** — Download configs from multiple public sources
-- **Custom Sources** — Add your own config sources
-- **Smart Caching** — Cache location data to avoid API rate limits
-- **Multi-API Fallback** — Uses multiple GeoIP APIs with automatic fallback
+- Added **Region Sorting** (`-xray-region-sort`)
+- Automatically saves alive configs into country-based files
+- Added **custom HTTP test URL** (`-xray-url`)
+- HTTP status code reporting
+- Better latency measurement
+- Improved Xray startup detection
+- Automatic SOCKS5 readiness verification
+- Better config deduplication
+- Improved GeoIP caching
+- Automatic GeoIP API fallback
+- More stable HTTP validation
+- Better error reporting from Xray
+- Improved Reality/TLS handling
+- Added support for additional transport types:
+  - WebSocket
+  - gRPC
+  - XHTTP
+  - HTTPUpgrade
+- Better VMess parser
+- Better Shadowsocks parser
+- Improved IPv6 support
+- Automatic region directory creation
+- Alive configs can now be exported by country
 
-### 🆕 New Flags
+### 🛠 Bug Fixes
 
-| Flag | Description |
-|------|-------------|
-| `-xray-file` | Xray config file path |
-| `-xray-dl` | Download configs from online sources |
-| `-xray-limit` | Limit number of configs to test |
-| `-xray-threads` | Concurrent test threads (default: 10) |
-| `-xray-timeout` | Test timeout in seconds (default: 0.5) |
-| `-xray-add-source` | Add new Xray config source URL |
-| `-xray-output` | Output file for alive configs |
+- Fixed random Xray startup failures
+- Fixed VMess parsing edge cases
+- Fixed Shadowsocks parsing issues
+- Fixed duplicated config handling
+- Fixed HTTP timeout handling
+- Fixed SOCKS5 connection race conditions
+- Fixed Reality configuration generation
+- Fixed TLS fingerprint parsing
+- Fixed ALPN parsing
+- Fixed GeoIP cache synchronization
+- Fixed temporary config cleanup
+- Improved concurrent testing stability
 
 ---
 
@@ -249,6 +266,7 @@ ct -xray-file configs.txt -xray-output alive.txt
 | `-xray-timeout` | Test timeout in seconds | `0.5` |
 | `-xray-add-source` | Add new config source URL | `-` |
 | `-xray-output` | Output file for alive configs | `alive_configs.txt` |
+| `-xray-url` | Send Request with config to url | `https://google.com` |
 
 ---
 
