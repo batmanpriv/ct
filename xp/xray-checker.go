@@ -92,6 +92,7 @@ type SSConfig struct {
 	Port     int
 }
 
+
 const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"
