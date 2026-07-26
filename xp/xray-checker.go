@@ -1,1001 +1,1214 @@
-package xp
+package main
 
 import (
-	"archive/zip"
 	"bufio"
-	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"github.com/batmanpriv/ct/pc"
+	"github.com/batmanpriv/ct/xp"
+	"github.com/miekg/dns"
 )
 
-type XrayConfig struct {
-	Inbounds  []Inbound  `json:"inbounds"`
-	Outbounds []Outbound `json:"outbounds"`
+type DNSResult struct {
+	DNS         string          `json:"dns"`
+	Lookup      bool            `json:"lookup"`
+	LookupMs    int64           `json:"lookup_ms"`
+	HTTPS       bool            `json:"https"`
+	HTTPSMs     int64           `json:"https_ms"`
+	Status      int             `json:"status"`
+	TLSVersion  string          `json:"tls_version"`
+	CipherSuite string          `json:"cipher_suite"`
+	HTTP2       bool            `json:"http2"`
+	Country     string          `json:"country"`
+	ASN         string          `json:"asn"`
+	Provider    string          `json:"provider"`
+	Score       int             `json:"score"`
+	Records     map[string]bool `json:"records"`
+	DNSSEC      bool            `json:"dnssec"`
+	EDNS        bool            `json:"edns"`
+	EDNSBuffer  int             `json:"edns_buffer"`
+	IPv6        bool            `json:"ipv6"`
+	UDP         bool            `json:"udp"`
+	TCP         bool            `json:"tcp"`
+	DoT         bool            `json:"dot"`
+	DoH         bool            `json:"doh"`
 }
 
-type Inbound struct {
-	Port     int    `json:"port"`
-	Protocol string `json:"protocol"`
-	Settings struct {
-		Clients []struct {
-			ID string `json:"id"`
-		} `json:"clients"`
-	} `json:"settings"`
-	StreamSettings struct {
-		Network      string `json:"network"`
-		Security     string `json:"security"`
-		WSSettings   struct {
-			Path    string            `json:"path"`
-			Headers map[string]string `json:"headers"`
-		} `json:"wsSettings"`
-		GRPCSettings struct {
-			ServiceName string `json:"serviceName"`
-		} `json:"grpcSettings"`
-		RealitySettings struct {
-			ServerName string `json:"serverName"`
-			PublicKey  string `json:"publicKey"`
-			ShortID    string `json:"shortId"`
-		} `json:"realitySettings"`
-		TCPSettings struct {
-			Header struct {
-				Type string `json:"type"`
-			} `json:"header"`
-		} `json:"tcpSettings"`
-	} `json:"streamSettings"`
-}
-
-type Outbound struct {
-	Protocol string `json:"protocol"`
-	Settings struct {
-		VNext []struct {
-			Address string `json:"address"`
-			Port    int    `json:"port"`
-			Users   []struct {
-				ID         string `json:"id"`
-				Flow       string `json:"flow"`
-				Encryption string `json:"encryption"`
-			} `json:"users"`
-		} `json:"vnext"`
-		Servers []struct {
-			Address  string `json:"address"`
-			Port     int    `json:"port"`
-			Password string `json:"password"`
-		} `json:"servers"`
-	} `json:"settings"`
-	StreamSettings struct {
-		Network      string `json:"network"`
-		Security     string `json:"security"`
-		WSSettings   struct {
-			Path    string            `json:"path"`
-			Headers map[string]string `json:"headers"`
-		} `json:"wsSettings"`
-		GRPCSettings struct {
-			ServiceName string `json:"serviceName"`
-		} `json:"grpcSettings"`
-		RealitySettings struct {
-			ServerName string `json:"serverName"`
-			PublicKey  string `json:"publicKey"`
-			ShortID    string `json:"shortId"`
-		} `json:"realitySettings"`
-		TCPSettings struct {
-			Header struct {
-				Type string `json:"type"`
-			} `json:"header"`
-		} `json:"tcpSettings"`
-	} `json:"streamSettings"`
-}
-
-type TestResult struct {
-	Index      int
-	Config     string
-	Alive      bool
-	Latency    time.Duration
-	ErrorMsg   string
-	Server     string
-	Protocol   string
-	Network    string
-	Country    string
-	City       string
-	ISP        string
-	StatusCode int
-}
-
-type GeoInfo struct {
-	Country     string `json:"country"`
-	City        string `json:"city"`
-	ISP         string `json:"isp"`
-	Org         string `json:"org"`
-	CountryCode string `json:"countryCode"`
-	Status      string `json:"status"`
-	Message     string `json:"message"`
-}
-
-type SourceConfig struct {
-	Sources []string `json:"sources"`
-}
-
-type CheckerConfig struct {
-	ConfigFile string
-	Download   bool
-	Limit      int
+type Config struct {
+	DNSFile    string
 	Threads    int
-	Timeout    float64
-	AddSource  string
-	TestURL    string
+	Domains    string
+	Mode       int
+	OutputJSON bool
+	Score      bool
 	NoColor    bool
-	OutputFile string
+	SetDNS     string
+	ApplyBest  bool
+	Insecure   bool
+	TestURL    string
 }
 
-const (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorBlue   = "\033[34m"
-	colorCyan   = "\033[36m"
-	colorBold   = "\033[1m"
-	colorPurple = "\033[35m"
-	colorWhite  = "\033[37m"
+var (
+	cleanRegex = regexp.MustCompile(`[^0-9a-zA-Z\.\:\-\[\]]`)
+	mu         sync.Mutex
+	allResults []DNSResult
 )
 
-var defaultSources = []string{
-	"https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/vless_configs.txt",
-	"https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/vmess_configs.txt",
-	"https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/raw/refs/heads/main/trojan_configs.txt",
-	"https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/raw/refs/heads/main/ss_configs.txt",
-	"https://raw.githubusercontent.com/Epodonios/v2ray-configs/raw/refs/heads/main/Sub1.txt",
-	"https://raw.githubusercontent.com/roosterkid/openproxylist/raw/refs/heads/main/V2RAY_RAW.txt",
-	"https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/raw/refs/heads/main/sub.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub1.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub2.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub3.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub4.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub5.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub6.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub7.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Sub8.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vmess.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/trojan.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/ss.txt",
-	"https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/ssr.txt",
+type UIState struct {
+	results    []DNSResult
+	total      int
+	completed  int32
+	mu         sync.Mutex
+	shouldQuit bool
 }
 
-var geoAPIs = []string{
-	"http://ip-api.com/json/%s?fields=status,message,country,city,isp,org,countryCode",
-	"https://ipinfo.io/%s/json",
-}
+var uiState = &UIState{}
 
-var configFileName = "sources.json"
-var geoCache = make(map[string]GeoInfo)
-var cacheMutex sync.Mutex
-var geoAPIFallback = 0
+func main() {
+	config := parseFlags()
 
-func RunChecker(config CheckerConfig) {
-	if config.AddSource != "" {
-		err := addSourceToFile(config.AddSource)
-		if err != nil {
-			fmt.Printf("%sError adding source: %v%s\n", colorRed, err, colorReset)
+	if config.SetDNS != "" {
+		if config.SetDNS == "status" {
+			checkDNSStatus()
 			return
 		}
-		fmt.Printf("%sSource added successfully: %s%s\n", colorGreen, config.AddSource, colorReset)
+		setSystemDNS(config.SetDNS)
 		return
 	}
 
-	var configs []string
-	var err error
-
-	if config.Download {
-		fmt.Printf("%sDownloading configs from online sources...%s\n", colorPurple, colorReset)
-		configs, err = downloadConfigs()
-		if err != nil {
-			fmt.Printf("%sError downloading configs: %v%s\n", colorRed, err, colorReset)
-			return
+	if config.ApplyBest {
+		best := findAndApplyBestDNS(config)
+		if best != "" {
+			fmt.Printf("\n✓ Best DNS (%s) applied to system\n", best)
 		}
-		fmt.Printf("%sDownloaded %d configs%s\n", colorGreen, len(configs), colorReset)
+		return
+	}
+
+	if config.DNSFile == "" {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("DNS file path: ")
+		dnsPath, _ := reader.ReadString('\n')
+		config.DNSFile = strings.TrimSpace(dnsPath)
+	}
+
+	if config.Threads < 2 {
+		config.Threads = 2
+	}
+
+	if config.Domains == "" && config.TestURL == "" {
+		config.Domains = "cloudflare.com"
+	}
+
+	var domains []string
+	if config.TestURL != "" {
+		domains = []string{config.TestURL}
 	} else {
-		configs, err = readConfigs(config.ConfigFile)
-		if err != nil {
-			fmt.Printf("%sError reading configs: %v%s\n", colorRed, err, colorReset)
-			return
+		domains = strings.Split(config.Domains, ",")
+		for i := range domains {
+			domains[i] = strings.TrimSpace(domains[i])
 		}
 	}
 
-	if config.Limit > 0 && len(configs) > config.Limit {
-		configs = configs[:config.Limit]
-		fmt.Printf("%sLimited to %d configs%s\n", colorYellow, config.Limit, colorReset)
-	}
-
-	if len(configs) == 0 {
-		fmt.Printf("%sNo configs found%s\n", colorRed, colorReset)
-		return
-	}
-
-	fmt.Printf("%sLoaded %d configs%s\n", colorBlue, len(configs), colorReset)
-
-	xrayPath, err := getXrayBinary()
+	f, err := os.Open(config.DNSFile)
 	if err != nil {
-		fmt.Printf("%sError getting xray binary: %v%s\n", colorRed, err, colorReset)
+		fmt.Println("Error opening file:", err)
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var dnsList []string
+	for scanner.Scan() {
+		line := cleanRegex.ReplaceAllString(scanner.Text(), "")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			dnsList = append(dnsList, line)
+		}
+	}
+
+	if len(dnsList) == 0 {
+		fmt.Println("No valid DNS servers found")
 		return
 	}
 
-	fmt.Printf("%sUsing xray binary: %s%s\n", colorCyan, xrayPath, colorReset)
+	uiState.total = len(dnsList)
 
-	if config.Threads == 0 {
-		config.Threads = 10
-	}
-	if config.Timeout == 0 {
-		config.Timeout = 0.5
-	}
-	fmt.Printf("%sThreads: %d, Timeout: %.1fs%s\n", colorCyan, config.Threads, config.Timeout, colorReset)
+	go uiLoop(config)
 
-	outputFile := config.OutputFile
-	if outputFile == "" {
-		outputFile = "alive_configs.txt"
-	}
-
-	f, err := os.Create(outputFile)
-	if err != nil {
-		fmt.Printf("%sError creating alive file: %v%s\n", colorRed, err, colorReset)
-		return
-	}
-	f.Close()
-
-	results := make([]TestResult, len(configs))
+	jobs := make(chan string, len(dnsList))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, config.Threads)
-	var mu sync.Mutex
 
-	fmt.Printf("\n%sTesting configs...%s\n\n", colorBold, colorReset)
-
-	for i, cfg := range configs {
+	for i := 0; i < config.Threads; i++ {
 		wg.Add(1)
-		go func(idx int, configStr string) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			result := testConfig(xrayPath, configStr, idx, config.Timeout, config.TestURL)
-			results[idx] = result
-
-			mu.Lock()
-			if result.Alive {
-				appendAliveConfig(outputFile, configStr)
-				location := ""
-				if result.Country != "" {
-					location = fmt.Sprintf(" [%s", result.Country)
-					if result.City != "" {
-						location += fmt.Sprintf(" - %s", result.City)
-					}
-					if result.ISP != "" {
-						location += fmt.Sprintf(" - %s", result.ISP)
-					}
-					location += "]"
+			for dns := range jobs {
+				result := testDNS(dns, domains, config)
+				if result.Lookup {
+					uiState.mu.Lock()
+					uiState.results = append(uiState.results, result)
+					uiState.mu.Unlock()
+					saveValidDNS(dns)
 				}
-				statusInfo := ""
-				if result.StatusCode > 0 {
-					statusInfo = fmt.Sprintf(" [HTTP %d]", result.StatusCode)
-				}
-				fmt.Printf("%s[%d] %s✓ ALIVE%s %s(%s) %.0fms%s%s%s\n",
-					colorGreen, idx, colorGreen, colorReset,
-					result.Server, result.Protocol, result.Latency.Seconds()*1000,
-					statusInfo, colorWhite, location)
-			} else {
-				fmt.Printf("%s[%d] %s✗ DEAD%s %s: %s%s\n",
-					colorRed, idx, colorRed, colorReset,
-					result.Server, result.ErrorMsg, colorReset)
+				atomic.AddInt32(&uiState.completed, 1)
 			}
-			mu.Unlock()
-		}(i, cfg)
+		}()
 	}
 
+	for _, dns := range dnsList {
+		jobs <- dns
+	}
+	close(jobs)
 	wg.Wait()
 
-	fmt.Printf("\n%s=== SUMMARY ===%s\n", colorBold, colorReset)
-	aliveCount := 0
-	httpSuccessCount := 0
-	countryStats := make(map[string]int)
+	uiState.mu.Lock()
+	uiState.shouldQuit = true
+	uiState.mu.Unlock()
 
-	for _, result := range results {
-		if result.Alive {
-			aliveCount++
-			if result.StatusCode >= 200 && result.StatusCode < 400 {
-				httpSuccessCount++
-			}
-			if result.Country != "" {
-				countryStats[result.Country]++
-			}
+	time.Sleep(500 * time.Millisecond)
+
+	if config.OutputJSON {
+		saveJSON(uiState.results)
+	}
+
+	printSummary(uiState.results, config)
+	printRecommendation(uiState.results, config)
+}
+
+func uiLoop(config Config) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		uiState.mu.Lock()
+		if uiState.shouldQuit {
+			uiState.mu.Unlock()
+			return
 		}
-	}
+		results := make([]DNSResult, len(uiState.results))
+		copy(results, uiState.results)
+		completed := atomic.LoadInt32(&uiState.completed)
+		uiState.mu.Unlock()
 
-	fmt.Printf("%sTotal: %d%s\n", colorBlue, len(configs), colorReset)
-	fmt.Printf("%sAlive: %d%s\n", colorGreen, aliveCount, colorReset)
-	fmt.Printf("%sDead: %d%s\n", colorRed, len(configs)-aliveCount, colorReset)
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("DNS Benchmark - Testing %d servers\n\n", uiState.total)
 
-	if config.TestURL != "" {
-		fmt.Printf("%sHTTP OK: %d%s\n", colorPurple, httpSuccessCount, colorReset)
-	}
+		progress := float64(completed) / float64(uiState.total) * 100
+		fmt.Printf("Progress: %.1f%% (%d/%d) | Valid: %d\n\n",
+			progress, completed, uiState.total, len(results))
 
-	if len(countryStats) > 0 {
-		fmt.Printf("\n%s=== LOCATION STATS ===%s\n", colorPurple, colorReset)
-		for country, count := range countryStats {
-			fmt.Printf("%s%s: %d%s\n", colorCyan, country, count, colorReset)
+		if len(results) > 0 {
+			sortResults(results, config)
+			printTable(results, config)
+		} else {
+			fmt.Println("Waiting for results...")
 		}
-	}
-
-	if aliveCount > 0 {
-		fmt.Printf("\n%sAlive configs saved to: %s%s\n", colorGreen, outputFile, colorReset)
 	}
 }
 
-func getGeoLocation(ip string) GeoInfo {
-	cacheMutex.Lock()
-	if cached, ok := geoCache[ip]; ok {
-		cacheMutex.Unlock()
-		return cached
-	}
-	cacheMutex.Unlock()
-
-	client := &http.Client{
-		Timeout: 3 * time.Second,
-	}
-
-	var geo GeoInfo
-
-	for i := 0; i < len(geoAPIs); i++ {
-		apiIndex := (geoAPIFallback + i) % len(geoAPIs)
-		apiURL := fmt.Sprintf(geoAPIs[apiIndex], ip)
-
-		resp, err := client.Get(apiURL)
-		if err != nil {
-			continue
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			continue
-		}
-
-		var raw map[string]interface{}
-		err = json.Unmarshal(body, &raw)
-		if err != nil {
-			continue
-		}
-
-		if apiIndex == 0 {
-			if status, ok := raw["status"].(string); ok && status == "success" {
-				geo.Status = "success"
-				if country, ok := raw["country"].(string); ok {
-					geo.Country = country
-				}
-				if city, ok := raw["city"].(string); ok {
-					geo.City = city
-				}
-				if isp, ok := raw["isp"].(string); ok {
-					geo.ISP = isp
-				}
-				if org, ok := raw["org"].(string); ok {
-					geo.Org = org
-				}
-				if code, ok := raw["countryCode"].(string); ok {
-					geo.CountryCode = code
-				}
-
-				if geo.Country != "" {
-					geoAPIFallback = apiIndex
-					break
-				}
-			} else if msg, ok := raw["message"].(string); ok && strings.Contains(msg, "rate limited") {
-				geoAPIFallback = (apiIndex + 1) % len(geoAPIs)
-				continue
+func sortResults(results []DNSResult, config Config) {
+	sort.Slice(results, func(i, j int) bool {
+		if config.Score && config.Mode >= 1 {
+			if results[i].Score != results[j].Score {
+				return results[i].Score > results[j].Score
 			}
-		} else if apiIndex == 1 {
-			if country, ok := raw["country"].(string); ok {
-				geo.Status = "success"
-				geo.Country = country
-				if city, ok := raw["city"].(string); ok {
-					geo.City = city
+			return results[i].LookupMs < results[j].LookupMs
+		}
+		return results[i].LookupMs < results[j].LookupMs
+	})
+}
+
+func printTable(results []DNSResult, config Config) {
+	green := "\033[32m"
+	yellow := "\033[33m"
+	red := "\033[31m"
+	reset := "\033[0m"
+
+	if config.NoColor {
+		green = ""
+		yellow = ""
+		red = ""
+		reset = ""
+	}
+
+	fmt.Printf("%-4s %-16s %-10s %-12s %-10s %-20s %-6s\n",
+		"#", "DNS", "Lookup", "HTTPS", "Location", "Provider", "Score")
+	fmt.Println(strings.Repeat("-", 85))
+
+	for i, result := range results {
+		if i >= 20 {
+			break
+		}
+
+		lookupStr := fmt.Sprintf("%dms", result.LookupMs)
+		httpsStr := "-"
+		if config.Mode >= 1 {
+			if result.HTTPS {
+				httpsStr = fmt.Sprintf("%dms", result.HTTPSMs)
+			} else {
+				httpsStr = "FAIL"
+			}
+		}
+
+		location := result.Country
+		if location == "" {
+			location = "Unknown"
+		}
+
+		provider := result.Provider
+		if len(provider) > 18 {
+			provider = provider[:18] + ".."
+		}
+		if provider == "" {
+			provider = "-"
+		}
+
+		scoreStr := "-"
+		if config.Mode >= 1 {
+			scoreStr = fmt.Sprintf("%d", result.Score)
+		}
+
+		color := green
+		if config.Mode >= 1 {
+			if result.Score >= 70 {
+				color = green
+			} else if result.Score >= 50 {
+				color = yellow
+			} else {
+				color = red
+			}
+		}
+
+		rank := fmt.Sprintf("#%d", i+1)
+		fmt.Printf("%s%-4s %-16s %-10s %-12s %-10s %-20s %-6s%s\n",
+			color, rank, result.DNS, lookupStr, httpsStr, location, provider, scoreStr, reset)
+	}
+}
+
+func parseFlags() Config {
+	config := Config{}
+	testURL := ""
+
+	flag.StringVar(&config.DNSFile, "dns", "", "DNS file path")
+	flag.IntVar(&config.Threads, "t", 10, "Number of threads")
+	flag.StringVar(&config.Domains, "domains", "cloudflare.com", "Domains to test (comma separated)")
+	flag.StringVar(&testURL, "url", "", "Test URL for HTTP check")
+	flag.IntVar(&config.Mode, "mode", 0, "0: DNS only, 1: DNS + HTTP")
+	flag.BoolVar(&config.OutputJSON, "json", false, "Output in JSON format")
+	flag.BoolVar(&config.Score, "score", false, "Sort by score instead of speed")
+	flag.BoolVar(&config.NoColor, "no-color", false, "Disable colored output")
+	flag.StringVar(&config.SetDNS, "set", "", "Set system DNS (e.g. -set 1.1.1.1 or -set status)")
+	flag.BoolVar(&config.ApplyBest, "apply-best", false, "Find best DNS and apply to system")
+	flag.BoolVar(&config.Insecure, "insecure", false, "Allow insecure TLS for DoT")
+
+	proxyFile := flag.String("proxy", "", "Proxy file path")
+	proxyThreads := flag.Int("proxy-t", 50, "Proxy threads")
+	proxyTypes := flag.String("proxy-types", "", "Proxy types")
+	proxyAuto := flag.Bool("proxy-auto", true, "Auto detect proxy type")
+	proxyDownload := flag.Bool("proxy-dl", false, "Download proxies")
+	proxyScrape := flag.Bool("proxy-scrape", false, "Scrape proxies")
+	proxyScore := flag.Bool("proxy-score", false, "Sort by score")
+	proxyApplyBest := flag.Bool("proxy-apply-best", false, "Apply best proxy")
+	proxySet := flag.String("proxy-set", "", "Set system proxy")
+	proxyTestURL := flag.String("proxy-url", "http://httpbin.org/ip", "Test URL for proxy")
+
+	xrayFile := flag.String("xray-file", "", "Xray config file path")
+	xrayDownload := flag.Bool("xray-dl", false, "Download xray configs")
+	xrayLimit := flag.Int("xray-limit", 0, "Limit number of xray configs")
+	xrayThreads := flag.Int("xray-threads", 30, "Xray test threads")
+	xrayTimeout := flag.Float64("xray-timeout", 2, "Xray test timeout in seconds")
+	xrayAddSource := flag.String("xray-add-source", "", "Add new xray source URL")
+	xrayTestURL := flag.String("xray-url", "", "Test URL for xray HTTP check")
+	xrayOutput := flag.String("xray-output", "alive_configs.txt", "Output file for alive xray configs")
+
+	flag.Parse()
+
+	config.TestURL = testURL
+
+	if *xrayFile != "" || *xrayDownload || *xrayAddSource != "" {
+		xrayConfig := xp.CheckerConfig{
+			ConfigFile: *xrayFile,
+			Download:   *xrayDownload,
+			Limit:      *xrayLimit,
+			Threads:    *xrayThreads,
+			Timeout:    *xrayTimeout,
+			AddSource:  *xrayAddSource,
+			TestURL:    *xrayTestURL,
+			NoColor:    false,
+			OutputFile: *xrayOutput,
+		}
+		xp.RunChecker(xrayConfig)
+		if *xrayFile != "" || *xrayDownload || *xrayAddSource != "" {
+			os.Exit(0)
+		}
+	}
+
+	if *proxyFile != "" || *proxyDownload || *proxyScrape || *proxyApplyBest || *proxySet != "" {
+		pcConfig := pc.Config{
+			ProxyFile:  *proxyFile,
+			Threads:    *proxyThreads,
+			Types:      *proxyTypes,
+			AutoDetect: *proxyAuto,
+			Download:   *proxyDownload,
+			Scrape:     *proxyScrape,
+			Score:      *proxyScore,
+			ApplyBest:  *proxyApplyBest,
+			SetProxy:   *proxySet,
+			TestURL:    *proxyTestURL,
+			Timeout:    3,
+			OutputJSON: false,
+			NoColor:    false,
+		}
+
+		pc.RunProxyChecker(pcConfig)
+
+		if *proxyFile != "" || *proxyDownload || *proxyScrape || *proxyApplyBest {
+			os.Exit(0)
+		}
+	}
+
+	return config
+}
+
+func findAndApplyBestDNS(config Config) string {
+	dnsList := []string{
+		"1.1.1.1", "1.0.0.1",
+		"8.8.8.8", "8.8.4.4",
+		"9.9.9.9", "149.112.112.112",
+		"208.67.222.222", "208.67.220.220",
+		"94.140.14.14", "94.140.15.15",
+		"76.76.19.19", "76.223.122.150",
+	}
+
+	var domains []string
+	if config.TestURL != "" {
+		domains = []string{config.TestURL}
+	} else {
+		domains = strings.Split(config.Domains, ",")
+		for i := range domains {
+			domains[i] = strings.TrimSpace(domains[i])
+		}
+	}
+
+	fmt.Printf("Finding best DNS among %d servers...\n\n", len(dnsList))
+
+	var results []DNSResult
+	var wg sync.WaitGroup
+	jobs := make(chan string, len(dnsList))
+	resultsMu := sync.Mutex{}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for dns := range jobs {
+				result := testDNS(dns, domains, config)
+				resultsMu.Lock()
+				if result.Lookup {
+					results = append(results, result)
 				}
-				if org, ok := raw["org"].(string); ok {
-					geo.ISP = org
-				}
-				if code, ok := raw["country"].(string); ok {
-					if len(code) >= 2 {
-						geo.CountryCode = code[:2]
-					}
-				}
-				geoAPIFallback = apiIndex
+				resultsMu.Unlock()
+			}
+		}()
+	}
+
+	for _, dns := range dnsList {
+		jobs <- dns
+	}
+	close(jobs)
+	wg.Wait()
+
+	if len(results) == 0 {
+		fmt.Println("No valid DNS found")
+		return ""
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].LookupMs < results[j].LookupMs
+	})
+
+	best := results[0]
+
+	fmt.Printf("Best DNS: %s\n", best.DNS)
+	fmt.Printf("  Lookup: %dms\n", best.LookupMs)
+	if best.HTTPS {
+		fmt.Printf("  HTTPS: %dms\n", best.HTTPSMs)
+	}
+	fmt.Printf("  DNSSEC: %v\n", best.DNSSEC)
+	fmt.Printf("  DoH: %v\n", best.DoH)
+	fmt.Printf("  IPv6: %v\n", best.IPv6)
+	fmt.Printf("  Score: %d/100\n\n", best.Score)
+
+	setSystemDNS(best.DNS)
+	return best.DNS
+}
+
+func printRecommendation(results []DNSResult, config Config) {
+	if len(results) == 0 {
+		return
+	}
+
+	sorted := make([]DNSResult, len(results))
+	copy(sorted, results)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Score != sorted[j].Score {
+			return sorted[i].Score > sorted[j].Score
+		}
+		return sorted[i].LookupMs < sorted[j].LookupMs
+	})
+
+	best := sorted[0]
+	var secondary DNSResult
+	if len(sorted) > 1 {
+		secondary = sorted[1]
+	}
+
+	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
+	fmt.Printf("%s      RECOMMENDED DNS CONFIGURATION%s\n", "\033[33m", "\033[0m")
+	fmt.Printf("%s========================================%s\n", "\033[32m", "\033[0m")
+
+	fmt.Printf("\nPrimary:   %s\n", best.DNS)
+	if secondary.DNS != "" {
+		fmt.Printf("Secondary: %s\n", secondary.DNS)
+	}
+
+	fmt.Printf("\nReason:\n")
+	fmt.Printf("  • Latency: %dms (Excellent)\n", best.LookupMs)
+	if best.HTTPS {
+		fmt.Printf("  • HTTPS: %dms\n", best.HTTPSMs)
+	}
+	fmt.Printf("  • DNSSEC: %v\n", best.DNSSEC)
+	fmt.Printf("  • DoH: %v\n", best.DoH)
+	fmt.Printf("  • IPv6: %v\n", best.IPv6)
+	fmt.Printf("  • Score: %d/100\n", best.Score)
+
+	fmt.Printf("\nTo apply this DNS automatically:\n")
+	fmt.Printf("  ct.exe -apply-best\n")
+
+	fmt.Printf("%s========================================%s\n", "\033[32m", "\033[0m")
+}
+
+func setSystemDNS(dns string) {
+	fmt.Printf("\nSetting system DNS to: %s\n", dns)
+	fmt.Println(strings.Repeat("-", 40))
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("net", "session")
+		if err := cmd.Run(); err != nil {
+			fmt.Println("⚠️ You need to run as Administrator!")
+			return
+		}
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		setWindowsDNS(dns)
+	case "linux":
+		setLinuxDNS(dns)
+	case "darwin":
+		setMacDNS(dns)
+	default:
+		fmt.Printf("Unsupported OS: %s\n", runtime.GOOS)
+	}
+}
+
+func setWindowsDNS(dns string) {
+	interfaces := []string{"Wi-Fi", "Ethernet", "Ethernet 2"}
+	var iface string
+
+	for _, name := range interfaces {
+		cmd := exec.Command("powershell", "-Command",
+			fmt.Sprintf(`Get-NetAdapter | Where-Object {$_.Status -eq "Up" -and $_.Name -eq "%s"} | Select-Object -First 1 | ForEach-Object { $_.InterfaceIndex }`, name))
+		output, err := cmd.Output()
+		if err == nil {
+			iface = strings.TrimSpace(string(output))
+			if iface != "" {
 				break
 			}
 		}
 	}
 
-	cacheMutex.Lock()
-	geoCache[ip] = geo
-	cacheMutex.Unlock()
-
-	return geo
-}
-
-func addSourceToFile(source string) error {
-	var sources []string
-
-	if _, err := os.Stat(configFileName); err == nil {
-		data, err := os.ReadFile(configFileName)
+	if iface == "" {
+		cmd := exec.Command("powershell", "-Command",
+			`Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1 | ForEach-Object { $_.InterfaceIndex }`)
+		output, err := cmd.Output()
 		if err != nil {
-			return err
+			fmt.Println("Error finding network interface:", err)
+			return
 		}
-		var config SourceConfig
-		err = json.Unmarshal(data, &config)
-		if err != nil {
-			return err
-		}
-		sources = config.Sources
+		iface = strings.TrimSpace(string(output))
 	}
 
-	for _, s := range sources {
-		if s == source {
-			return fmt.Errorf("source already exists")
-		}
-	}
-
-	sources = append(sources, source)
-
-	config := SourceConfig{Sources: sources}
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configFileName, data, 0644)
-}
-
-func getSources() []string {
-	var sources []string
-
-	if _, err := os.Stat(configFileName); err == nil {
-		data, err := os.ReadFile(configFileName)
-		if err == nil {
-			var config SourceConfig
-			err = json.Unmarshal(data, &config)
-			if err == nil {
-				sources = config.Sources
-			}
-		}
-	}
-
-	if len(sources) == 0 {
-		sources = defaultSources
-	}
-
-	return sources
-}
-
-func downloadConfigs() ([]string, error) {
-	sources := getSources()
-	var allConfigs []string
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10)
-
-	for _, source := range sources {
-		wg.Add(1)
-		go func(url string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			client := &http.Client{
-				Timeout: 10 * time.Second,
-			}
-
-			resp, err := client.Get(url)
-			if err != nil {
-				fmt.Printf("%sFailed to download %s: %v%s\n", colorRed, url, err, colorReset)
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != 200 {
-				fmt.Printf("%sFailed to download %s (status: %d)%s\n", colorRed, url, resp.StatusCode, colorReset)
-				return
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				fmt.Printf("%sFailed to read %s: %v%s\n", colorRed, url, err, colorReset)
-				return
-			}
-
-			scanner := bufio.NewScanner(bytes.NewReader(body))
-			var count int
-			configsSet := make(map[string]bool)
-
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" && !strings.HasPrefix(line, "#") {
-					if !configsSet[line] {
-						mu.Lock()
-						allConfigs = append(allConfigs, line)
-						configsSet[line] = true
-						count++
-						mu.Unlock()
-					}
-				}
-			}
-			fmt.Printf("%sDownloaded %d configs from %s%s\n", colorCyan, count, url, colorReset)
-		}(source)
-	}
-
-	wg.Wait()
-	return allConfigs, nil
-}
-
-func readConfigs(filename string) ([]string, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var configs []string
-	configsSet := make(map[string]bool)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			if !configsSet[line] {
-				configs = append(configs, line)
-				configsSet[line] = true
-			}
-		}
-	}
-	return configs, scanner.Err()
-}
-
-func appendAliveConfig(filename, config string) {
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
+	if iface == "" {
+		fmt.Println("No active network interface found")
 		return
 	}
-	defer f.Close()
-	f.WriteString(config + "\n")
+
+	cmd := exec.Command("netsh", "interface", "ipv4", "set", "dns", iface, "dhcp")
+	cmd.Run()
+
+	cmd = exec.Command("netsh", "interface", "ipv4", "set", "dns", iface, "static", dns, "primary")
+	if err := cmd.Run(); err != nil {
+		fmt.Println("Error setting DNS:", err)
+		return
+	}
+
+	fmt.Printf("✓ DNS set to %s (Interface: %s)\n", dns, iface)
+	exec.Command("ipconfig", "/flushdns").Run()
 }
 
-func getXrayBinary() (string, error) {
-	homeDir, err := os.UserHomeDir()
+func setLinuxDNS(dns string) {
+	cmd := exec.Command("systemd-resolve", "--set-dns="+dns, "--interface=eth0")
+	if err := cmd.Run(); err == nil {
+		fmt.Printf("✓ DNS set to %s using systemd-resolved\n", dns)
+		return
+	}
+
+	resolvConf := fmt.Sprintf("nameserver %s\n", dns)
+	cmd = exec.Command("sh", "-c", "echo '"+resolvConf+"' | sudo tee /etc/resolv.conf > /dev/null")
+	if err := cmd.Run(); err != nil {
+		fmt.Println("Error setting DNS. Try running with sudo:", err)
+		return
+	}
+	fmt.Printf("✓ DNS set to %s in /etc/resolv.conf\n", dns)
+}
+
+func setMacDNS(dns string) {
+	cmd := exec.Command("networksetup", "-listallnetworkservices")
+	output, err := cmd.Output()
 	if err != nil {
-		return "", err
+		fmt.Println("Error finding network service:", err)
+		return
 	}
 
-	xrayDir := filepath.Join(homeDir, ".xray-test")
-	if err := os.MkdirAll(xrayDir, 0755); err != nil {
-		return "", err
-	}
-
-	var binaryName string
-	if runtime.GOOS == "windows" {
-		binaryName = "xray.exe"
-	} else {
-		binaryName = "xray"
-	}
-
-	xrayPath := filepath.Join(xrayDir, binaryName)
-
-	if _, err := os.Stat(xrayPath); err == nil {
-		fmt.Printf("%sXray binary already exists%s\n", colorGreen, colorReset)
-		return xrayPath, nil
-	}
-
-	fmt.Printf("%sDownloading xray binary for %s/%s...%s\n", colorYellow, runtime.GOOS, runtime.GOARCH, colorReset)
-
-	url := getDownloadURL()
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("download failed: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return "", err
-	}
-
-	found := false
-	for _, file := range zipReader.File {
-		if file.Name == binaryName || file.Name == "xray.exe" || file.Name == "xray" {
-			rc, err := file.Open()
-			if err != nil {
-				return "", err
-			}
-			defer rc.Close()
-
-			outFile, err := os.Create(xrayPath)
-			if err != nil {
-				return "", err
-			}
-			defer outFile.Close()
-
-			_, err = io.Copy(outFile, rc)
-			if err != nil {
-				return "", err
-			}
-			found = true
+	lines := strings.Split(string(output), "\n")
+	var service string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.Contains(line, "*") && !strings.Contains(line, "Bluetooth") {
+			service = line
 			break
 		}
 	}
 
-	if !found {
-		return "", fmt.Errorf("binary not found in zip")
+	if service == "" {
+		fmt.Println("No active network service found")
+		return
 	}
 
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(xrayPath, 0755); err != nil {
-			return "", err
+	cmd = exec.Command("networksetup", "-setdnsservers", service, dns)
+	if err := cmd.Run(); err != nil {
+		fmt.Println("Error setting DNS:", err)
+		return
+	}
+	fmt.Printf("✓ DNS set to %s (Service: %s)\n", dns, service)
+}
+
+func checkDNSStatus() {
+	fmt.Println("\nCurrent DNS Settings:")
+	fmt.Println(strings.Repeat("-", 40))
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("netsh", "interface", "ipv4", "show", "dns")
+		output, _ := cmd.Output()
+		fmt.Println(string(output))
+	case "linux":
+		cmd := exec.Command("systemd-resolve", "--status")
+		if output, err := cmd.Output(); err == nil {
+			fmt.Println(string(output))
+			return
 		}
+		cmd = exec.Command("cat", "/etc/resolv.conf")
+		output, _ := cmd.Output()
+		fmt.Println(string(output))
+	case "darwin":
+		cmd := exec.Command("networksetup", "-getdnsservers", "Wi-Fi")
+		output, _ := cmd.Output()
+		fmt.Printf("Wi-Fi DNS:\n%s\n", string(output))
+		cmd = exec.Command("networksetup", "-getdnsservers", "Ethernet")
+		output, _ = cmd.Output()
+		fmt.Printf("Ethernet DNS:\n%s\n", string(output))
+	default:
+		fmt.Printf("Unsupported OS: %s\n", runtime.GOOS)
 	}
-
-	fmt.Printf("%sXray binary downloaded successfully%s\n", colorGreen, colorReset)
-	return xrayPath, nil
 }
 
-func getDownloadURL() string {
-	os := runtime.GOOS
-	arch := runtime.GOARCH
-
-	if os == "darwin" {
-		os = "macos"
+func testDNS(dnsServer string, domains []string, config Config) DNSResult {
+	result := DNSResult{
+		DNS:     dnsServer,
+		Records: make(map[string]bool),
 	}
 
-	if arch == "amd64" {
-		arch = "64"
-	} else if arch == "arm64" {
-		arch = "arm64-v8a"
-	} else if arch == "386" {
-		arch = "32"
-	}
-
-	return fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-%s-%s.zip", os, arch)
-}
-
-func testConfig(xrayPath string, config string, index int, timeoutSec float64, testURL string) TestResult {
-	result := TestResult{
-		Index:  index,
-		Config: config,
-		Alive:  false,
-	}
-
-	parsed, err := parseConfig(config)
-	if err != nil {
-		result.ErrorMsg = fmt.Sprintf("parse error: %v", err)
-		result.Server = "unknown"
-		return result
-	}
-
-	result.Server = parsed.Hostname()
-	result.Protocol = parsed.Scheme
-	result.Network = parsed.Query().Get("type")
-	if result.Network == "" {
-		result.Network = "tcp"
-	}
-
-	geo := getGeoLocation(result.Server)
-	result.Country = geo.Country
-	result.City = geo.City
-	result.ISP = geo.ISP
-
-	cfgFile, err := createXrayConfig(parsed)
-	if err != nil {
-		result.ErrorMsg = fmt.Sprintf("config error: %v", err)
-		return result
-	}
-	defer os.Remove(cfgFile)
-
-	timeoutDuration := time.Duration(timeoutSec*1000) * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration+5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, xrayPath, "run", "-c", cfgFile)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	serverAddr, port := parseDNSAddress(dnsServer)
 
 	start := time.Now()
-	err = cmd.Start()
-	if err != nil {
-		result.ErrorMsg = fmt.Sprintf("start error: %v", err)
+	ips, err := dnsLookup(serverAddr, port, domains[0], dns.TypeA)
+	lookupTime := time.Since(start).Milliseconds()
+
+	if err != nil || len(ips) == 0 {
 		return result
 	}
 
-	time.Sleep(timeoutDuration)
+	result.Lookup = true
+	result.LookupMs = lookupTime
+	ip := ips[0]
 
-	alive := false
-	if testURL != "" {
-		alive, result.StatusCode = checkHTTPProxy(parsed, timeoutSec, testURL)
-	} else {
-		alive = checkTCPProxy(parsed, timeoutSec)
-	}
+	if config.Mode >= 1 {
+		result.UDP = testUDP(serverAddr, port)
+		result.TCP = testTCP(serverAddr, port, domains[0])
+		result.DNSSEC = testDNSSEC(serverAddr, port, domains[0])
+		result.EDNS, result.EDNSBuffer = testEDNS(serverAddr, port, domains[0])
+		result.IPv6 = testIPv6(serverAddr, port)
 
-	if alive {
-		result.Alive = true
-		result.Latency = time.Since(start)
-	} else {
-		if testURL != "" {
-			result.ErrorMsg = fmt.Sprintf("HTTP test failed (status: %d)", result.StatusCode)
-		} else {
-			result.ErrorMsg = "not responding"
+		recordTypes := []struct {
+			name  string
+			qtype uint16
+		}{
+			{"A", dns.TypeA},
+			{"AAAA", dns.TypeAAAA},
+			{"MX", dns.TypeMX},
+			{"TXT", dns.TypeTXT},
+			{"CNAME", dns.TypeCNAME},
+			{"NS", dns.TypeNS},
+			{"SOA", dns.TypeSOA},
 		}
+
+		for _, domain := range domains[:1] {
+			for _, rt := range recordTypes {
+				if _, err := dnsLookup(serverAddr, port, domain, rt.qtype); err == nil {
+					result.Records[rt.name] = true
+				}
+			}
+		}
+
+		httpStart := time.Now()
+		httpResult := testHTTP(ip, domains[0])
+		httpTime := time.Since(httpStart).Milliseconds()
+
+		if httpResult.success {
+			result.HTTPS = true
+			result.HTTPSMs = httpTime
+			result.Status = httpResult.status
+			result.TLSVersion = httpResult.tlsVersion
+			result.CipherSuite = httpResult.cipherSuite
+			result.HTTP2 = httpResult.http2
+		} else {
+			result.HTTPS = false
+			result.HTTPSMs = -1
+		}
+
+		result.DoT = testDoT(serverAddr, domains[0], config)
+		result.DoH = testDoH(serverAddr, domains[0])
+
+		result.Score = calculateScore(result)
 	}
 
-	cmd.Process.Kill()
-	cmd.Wait()
+	result.Country, result.Provider = getGeoIP(ip)
 
 	return result
 }
 
-func parseConfig(link string) (*url.URL, error) {
-	if !strings.Contains(link, "://") {
-		return nil, fmt.Errorf("invalid config format")
-	}
-
-	parts := strings.SplitN(link, "://", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid config format")
-	}
-
-	protocol := parts[0]
-	rest := parts[1]
-
-	atIndex := strings.Index(rest, "@")
-	if atIndex == -1 {
-		return nil, fmt.Errorf("missing @ in config")
-	}
-
-	userInfo := rest[:atIndex]
-	hostPart := rest[atIndex+1:]
-
-	questionIndex := strings.Index(hostPart, "?")
-	var host string
-	var query string
-	if questionIndex == -1 {
-		host = hostPart
-	} else {
-		host = hostPart[:questionIndex]
-		query = hostPart[questionIndex+1:]
-	}
-
-	hashIndex := strings.Index(host, "#")
-	if hashIndex != -1 {
-		host = host[:hashIndex]
-	}
-
-	fullURL := fmt.Sprintf("%s://%s@%s", protocol, userInfo, host)
-	if query != "" {
-		fullURL += "?" + query
-	}
-
-	return url.Parse(fullURL)
-}
-
-func createXrayConfig(parsed *url.URL) (string, error) {
-	config := XrayConfig{}
-
-	port, err := getFreePort()
-	if err != nil {
-		return "", err
-	}
-
-	protocol := parsed.Scheme
-
-	serverAddr := parsed.Hostname()
-	serverPort := 443
-	if parsed.Port() != "" {
-		serverPort, _ = strconv.Atoi(parsed.Port())
-	}
-
-	userInfo := parsed.User
-	var userID string
-	if userInfo != nil {
-		userID = userInfo.Username()
-	}
-	if userID == "" {
-		userID = "00000000-0000-0000-0000-000000000000"
-	}
-
-	query := parsed.Query()
-	security := query.Get("security")
-	network := query.Get("type")
-	if network == "" {
-		network = "tcp"
-	}
-	path := query.Get("path")
-	if path == "" {
-		path = "/"
-	}
-	hostHeader := query.Get("host")
-	sni := query.Get("sni")
-	pbk := query.Get("pbk")
-	sid := query.Get("sid")
-	serviceName := query.Get("serviceName")
-	flow := query.Get("flow")
-	encryption := query.Get("encryption")
-	if encryption == "" {
-		encryption = "none"
-	}
-	mode := query.Get("mode")
-
-	inbound := Inbound{
-		Port:     port,
-		Protocol: "socks",
-	}
-	inbound.Settings.Clients = append(inbound.Settings.Clients, struct {
-		ID string `json:"id"`
-	}{ID: userID})
-	inbound.StreamSettings.Network = "tcp"
-	inbound.StreamSettings.Security = "none"
-
-	config.Inbounds = append(config.Inbounds, inbound)
-
-	outbound := Outbound{
-		Protocol: protocol,
-	}
-	outbound.StreamSettings.Network = network
-	outbound.StreamSettings.Security = security
-
-	if network == "ws" {
-		outbound.StreamSettings.WSSettings.Path = path
-		if hostHeader != "" {
-			outbound.StreamSettings.WSSettings.Headers = map[string]string{"Host": hostHeader}
+func parseDNSAddress(address string) (string, int) {
+	if strings.HasPrefix(address, "[") && strings.Contains(address, "]") {
+		host, port, err := net.SplitHostPort(address)
+		if err == nil {
+			p, _ := strconv.Atoi(port)
+			return host, p
 		}
 	}
 
-	if network == "grpc" {
-		outbound.StreamSettings.GRPCSettings.ServiceName = serviceName
-		if mode == "gun" {
+	if strings.Contains(address, ":") {
+		parts := strings.Split(address, ":")
+		if len(parts) == 2 {
+			port, err := strconv.Atoi(parts[1])
+			if err == nil {
+				return parts[0], port
+			}
+		}
+		if net.ParseIP(address) != nil {
+			return address, 53
 		}
 	}
 
-	if security == "reality" {
-		outbound.StreamSettings.RealitySettings.ServerName = sni
-		outbound.StreamSettings.RealitySettings.PublicKey = pbk
-		outbound.StreamSettings.RealitySettings.ShortID = sid
-	}
-
-	if network == "tcp" && security == "reality" {
-		outbound.StreamSettings.TCPSettings.Header.Type = "none"
-	}
-
-	outbound.Settings.VNext = append(outbound.Settings.VNext, struct {
-		Address string `json:"address"`
-		Port    int    `json:"port"`
-		Users   []struct {
-			ID         string `json:"id"`
-			Flow       string `json:"flow"`
-			Encryption string `json:"encryption"`
-		} `json:"users"`
-	}{
-		Address: serverAddr,
-		Port:    serverPort,
-		Users: []struct {
-			ID         string `json:"id"`
-			Flow       string `json:"flow"`
-			Encryption string `json:"encryption"`
-		}{{
-			ID:         userID,
-			Flow:       flow,
-			Encryption: encryption,
-		}},
-	})
-
-	if protocol == "trojan" {
-		outbound.Settings.Servers = append(outbound.Settings.Servers, struct {
-			Address  string `json:"address"`
-			Port     int    `json:"port"`
-			Password string `json:"password"`
-		}{
-			Address:  serverAddr,
-			Port:     serverPort,
-			Password: userID,
-		})
-		outbound.Settings.VNext = nil
-	}
-
-	config.Outbounds = append(config.Outbounds, outbound)
-
-	jsonData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("xray_test_%d.json", time.Now().UnixNano()))
-	if err := os.WriteFile(tmpFile, jsonData, 0644); err != nil {
-		return "", err
-	}
-
-	return tmpFile, nil
+	return address, 53
 }
 
-func getFreePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
+func dnsLookup(dnsServer string, port int, domain string, qtype uint16) ([]string, error) {
+	c := new(dns.Client)
+	c.Timeout = 2 * time.Second
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), qtype)
+	m.RecursionDesired = true
+
+	if qtype == dns.TypeA || qtype == dns.TypeAAAA {
+		m.SetEdns0(4096, true)
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
+
+	r, _, err := c.Exchange(m, fmt.Sprintf("%s:%d", dnsServer, port))
+	if err != nil {
+		return nil, err
+	}
+
+	if r.Rcode != dns.RcodeSuccess {
+		return nil, fmt.Errorf("DNS error: %d", r.Rcode)
+	}
+
+	var ips []string
+	for _, ans := range r.Answer {
+		switch a := ans.(type) {
+		case *dns.A:
+			ips = append(ips, a.A.String())
+		case *dns.AAAA:
+			ips = append(ips, a.AAAA.String())
+		case *dns.MX:
+			ips = append(ips, fmt.Sprintf("%s (priority %d)", a.Mx, a.Preference))
+		case *dns.TXT:
+			ips = append(ips, strings.Join(a.Txt, " "))
+		case *dns.CNAME:
+			ips = append(ips, a.Target)
+		case *dns.NS:
+			ips = append(ips, a.Ns)
+		case *dns.SOA:
+			ips = append(ips, fmt.Sprintf("%s %s %d %d %d %d %d",
+				a.Ns, a.Mbox, a.Serial, a.Refresh, a.Retry, a.Expire, a.Minttl))
+		}
+	}
+
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no records found")
+	}
+
+	return ips, nil
 }
 
-func checkTCPProxy(parsed *url.URL, timeoutSec float64) bool {
-	host := parsed.Hostname()
-	port := 443
-	if parsed.Port() != "" {
-		port, _ = strconv.Atoi(parsed.Port())
-	}
+func testDNSSEC(dnsServer string, port int, domain string) bool {
+	c := new(dns.Client)
+	c.Timeout = 2 * time.Second
 
-	timeout := time.Duration(timeoutSec*1000) * time.Millisecond
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m.RecursionDesired = true
+
+	opt := new(dns.OPT)
+	opt.Hdr.Name = "."
+	opt.Hdr.Rrtype = dns.TypeOPT
+	opt.SetDo()
+	opt.SetUDPSize(4096)
+	m.Extra = append(m.Extra, opt)
+
+	r, _, err := c.Exchange(m, fmt.Sprintf("%s:%d", dnsServer, port))
 	if err != nil {
 		return false
 	}
-	conn.Close()
-	return true
+
+	if r.Rcode != dns.RcodeSuccess {
+		return false
+	}
+
+	for _, ans := range r.Answer {
+		if ans.Header().Rrtype == dns.TypeRRSIG {
+			return true
+		}
+	}
+	for _, ans := range r.Ns {
+		if ans.Header().Rrtype == dns.TypeRRSIG {
+			return true
+		}
+	}
+
+	return false
 }
 
-func checkHTTPProxy(parsed *url.URL, timeoutSec float64, testURL string) (bool, int) {
-	tr := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   time.Duration(timeoutSec*1000) * time.Millisecond,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-	}
+func testEDNS(dnsServer string, port int, domain string) (bool, int) {
+	c := new(dns.Client)
+	c.Timeout = 2 * time.Second
 
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   time.Duration(timeoutSec*1000) * time.Millisecond,
-	}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m.RecursionDesired = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec*1000)*time.Millisecond)
-	defer cancel()
+	m.SetEdns0(4096, false)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
+	r, _, err := c.Exchange(m, fmt.Sprintf("%s:%d", dnsServer, port))
 	if err != nil {
 		return false, 0
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	for _, extra := range r.Extra {
+		if extra.Header().Rrtype == dns.TypeOPT {
+			opt := extra.(*dns.OPT)
+			bufferSize := int(opt.Hdr.Class)
+			return true, bufferSize
+		}
+	}
+
+	return false, 0
+}
+
+func testUDP(dnsServer string, port int) bool {
+	c := new(dns.Client)
+	c.Timeout = 1 * time.Second
+	c.Net = "udp"
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("google.com"), dns.TypeA)
+	m.RecursionDesired = true
+
+	_, _, err := c.Exchange(m, fmt.Sprintf("%s:%d", dnsServer, port))
+	return err == nil
+}
+
+func testTCP(dnsServer string, port int, domain string) bool {
+	c := new(dns.Client)
+	c.Timeout = 2 * time.Second
+	c.Net = "tcp"
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m.RecursionDesired = true
+
+	_, _, err := c.Exchange(m, fmt.Sprintf("%s:%d", dnsServer, port))
+	return err == nil
+}
+
+func testDoT(dnsServer, domain string, config Config) bool {
+	c := new(dns.Client)
+	c.Timeout = 3 * time.Second
+	c.Net = "tcp-tls"
+	c.TLSConfig = &tls.Config{
+		ServerName:         dnsServer,
+		InsecureSkipVerify: config.Insecure,
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m.RecursionDesired = true
+
+	_, _, err := c.Exchange(m, fmt.Sprintf("%s:853", dnsServer))
+	return err == nil
+}
+
+func testDoH(dnsServer, domain string) bool {
+	knownDoH := map[string]string{
+		"1.1.1.1":         "cloudflare-dns.com",
+		"1.0.0.1":         "cloudflare-dns.com",
+		"8.8.8.8":         "dns.google",
+		"8.8.4.4":         "dns.google",
+		"9.9.9.9":         "dns.quad9.net",
+		"149.112.112.112": "dns.quad9.net",
+	}
+
+	host, ok := knownDoH[dnsServer]
+	if !ok {
+		return false
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	url := fmt.Sprintf("https://%s/dns-query?name=%s&type=A", host, domain)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Accept", "application/dns-message")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, 0
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+func testIPv6(dnsServer string, port int) bool {
+	_, err := dnsLookup(dnsServer, port, "google.com", dns.TypeAAAA)
+	return err == nil
+}
+
+func getGeoIP(ip string) (string, string) {
+	cacheKey := ip
+	if val, ok := geoCache.Load(cacheKey); ok {
+		if info, ok := val.(GeoInfo); ok {
+			return info.Country, info.Provider
+		}
+	}
+
+	var country, provider string
+	apis := []string{
+		"http://ip-api.com/json/%s?fields=countryCode,isp",
+		"https://ipwhois.app/json/%s",
+		"https://ipinfo.io/%s/json",
+	}
+
+	for _, api := range apis {
+		client := &http.Client{Timeout: 2 * time.Second}
+		url := fmt.Sprintf(api, ip)
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		var data map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			continue
+		}
+
+		if strings.Contains(api, "ip-api") {
+			country, _ = data["countryCode"].(string)
+			provider, _ = data["isp"].(string)
+		} else if strings.Contains(api, "ipwhois") {
+			country, _ = data["country"].(string)
+			provider, _ = data["isp"].(string)
+		} else if strings.Contains(api, "ipinfo") {
+			country, _ = data["country"].(string)
+			provider, _ = data["org"].(string)
+		}
+
+		if country != "" || provider != "" {
+			break
+		}
+	}
+
+	geoCache.Store(cacheKey, GeoInfo{Country: country, Provider: provider})
+
+	return country, provider
+}
+
+type GeoInfo struct {
+	Country  string
+	Provider string
+}
+
+var geoCache sync.Map
+
+type HTTPResult struct {
+	success     bool
+	status      int
+	tlsVersion  string
+	cipherSuite string
+	http2       bool
+}
+
+func testHTTP(ip, domain string) HTTPResult {
+	result := HTTPResult{success: false}
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 3 * time.Second}
+				return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, "443"))
+			},
+			TLSClientConfig: &tls.Config{
+				ServerName: domain,
+			},
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	req, err := http.NewRequest("GET", "https://"+domain, nil)
+	if err != nil {
+		return result
+	}
+	req.Host = domain
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return result
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		return true, resp.StatusCode
+	result.success = true
+	result.status = resp.StatusCode
+
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		result.tlsVersion = tlsVersionString(resp.TLS.Version)
+		result.cipherSuite = tlsCipherSuiteString(resp.TLS.CipherSuite)
 	}
 
-	return false, resp.StatusCode
+	if resp.ProtoMajor == 2 {
+		result.http2 = true
+	}
+
+	return result
+}
+
+func tlsVersionString(version uint16) string {
+	switch version {
+	case tls.VersionTLS12:
+		return "TLS1.2"
+	case tls.VersionTLS13:
+		return "TLS1.3"
+	default:
+		return "TLS1.0/1.1"
+	}
+}
+
+func tlsCipherSuiteString(cipher uint16) string {
+	switch cipher {
+	case tls.TLS_AES_128_GCM_SHA256:
+		return "TLS_AES_128_GCM_SHA256"
+	case tls.TLS_AES_256_GCM_SHA384:
+		return "TLS_AES_256_GCM_SHA384"
+	case tls.TLS_CHACHA20_POLY1305_SHA256:
+		return "TLS_CHACHA20_POLY1305_SHA256"
+	default:
+		return fmt.Sprintf("0x%x", cipher)
+	}
+}
+
+func calculateScore(result DNSResult) int {
+	score := 0
+
+	if result.Lookup {
+		score += 20
+		if result.LookupMs < 10 {
+			score += 15
+		} else if result.LookupMs < 50 {
+			score += 10
+		} else if result.LookupMs < 100 {
+			score += 5
+		}
+	}
+
+	if result.HTTPS {
+		score += 20
+		if result.HTTPSMs < 50 {
+			score += 15
+		} else if result.HTTPSMs < 200 {
+			score += 10
+		} else if result.HTTPSMs < 500 {
+			score += 5
+		}
+	}
+
+	if result.DNSSEC {
+		score += 10
+	}
+
+	if result.EDNS {
+		score += 5
+	}
+
+	if result.IPv6 {
+		score += 5
+	}
+
+	if result.UDP && result.TCP {
+		score += 5
+	}
+
+	if result.DoT || result.DoH {
+		score += 5
+	}
+
+	for _, v := range result.Records {
+		if v {
+			score += 2
+		}
+	}
+
+	if score > 100 {
+		score = 100
+	}
+
+	return score
+}
+
+func saveValidDNS(dns string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	file, err := os.OpenFile("valid_dns_"+time.Now().Format("20060102")+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	file.WriteString(dns + "\n")
+}
+
+func saveJSON(results []DNSResult) {
+	file, err := os.Create("results.json")
+	if err != nil {
+		fmt.Println("Error creating JSON:", err)
+		return
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	encoder.Encode(results)
+	fmt.Println("\nResults saved to results.json")
+}
+
+func printSummary(results []DNSResult, config Config) {
+	if len(results) == 0 {
+		fmt.Println("\nNo valid DNS servers found")
+		return
+	}
+
+	sorted := make([]DNSResult, len(results))
+	copy(sorted, results)
+	sortResults(sorted, config)
+
+	var totalLookup int64
+	var totalHTTPS int64
+	var totalScore int64
+
+	for _, r := range results {
+		if r.Lookup {
+			totalLookup++
+		}
+		if r.HTTPS {
+			totalHTTPS++
+		}
+		totalScore += int64(r.Score)
+	}
+
+	avgScore := int64(0)
+	if len(results) > 0 && config.Mode >= 1 {
+		avgScore = totalScore / int64(len(results))
+	}
+
+	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
+	fmt.Println("Git&Tg: github.com/batmanpriv")
+	fmt.Printf("Total DNS Tested: %d\n", len(results))
+	fmt.Printf("Valid DNS (Lookup OK): %d\n", totalLookup)
+	if config.Mode >= 1 {
+		fmt.Printf("HTTPS OK: %d\n", totalHTTPS)
+		fmt.Printf("Average Score: %d/100\n", avgScore)
+	}
+	fmt.Printf("Valid DNS saved to: valid_dns_%s.txt\n", time.Now().Format("20060102"))
+
+	if len(sorted) > 0 {
+		fmt.Printf("Fastest DNS: %s (%dms)\n", sorted[0].DNS, sorted[0].LookupMs)
+		if config.Mode >= 1 && config.Score {
+			fmt.Printf("Highest Score: %s (%d/100)\n", sorted[0].DNS, sorted[0].Score)
+		}
+	}
+	fmt.Printf("========================================\n")
 }
