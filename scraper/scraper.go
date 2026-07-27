@@ -210,48 +210,54 @@ func (s *Scraper) extractConfigsFromText(text string) (vless, vmess, trojan, ss,
 }
 
 func (s *Scraper) DetectSourceType(url string) string {
-	text, err := s.fetchURL(url)
-	if err != nil {
-		return "unknown"
-	}
+    url = strings.TrimSpace(url)
 
-	vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
+    if strings.Contains(url, "t.me/") {
+        return "telegram"
+    }
 
-	counts := map[string]int{
-		"vless":   len(vless),
-		"vmess":   len(vmess),
-		"trojan":  len(trojan),
-		"ss":      len(ss),
-		"mtproto": len(mtproto),
-		"proxy":   len(proxies),
-	}
+    text, err := s.fetchURL(url)
+    if err != nil {
+        return "unknown"
+    }
 
-	maxType := "unknown"
-	maxCount := 0
-	for typ, count := range counts {
-		if count > maxCount {
-			maxCount = count
-			maxType = typ
-		}
-	}
+    vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
 
-	if maxCount == 0 {
-		return "unknown"
-	}
+    counts := map[string]int{
+        "vless":   len(vless),
+        "vmess":   len(vmess),
+        "trojan":  len(trojan),
+        "ss":      len(ss),
+        "mtproto": len(mtproto),
+        "proxy":   len(proxies),
+    }
 
-	typeMap := map[string]string{
-		"vless":   "vless",
-		"vmess":   "vmess",
-		"trojan":  "trojan",
-		"ss":      "ss",
-		"mtproto": "mtproto",
-		"proxy":   "http",
-	}
+    maxType := "unknown"
+    maxCount := 0
+    for typ, count := range counts {
+        if count > maxCount {
+            maxCount = count
+            maxType = typ
+        }
+    }
 
-	if mapped, ok := typeMap[maxType]; ok {
-		return mapped
-	}
-	return "unknown"
+    if maxCount == 0 {
+        return "unknown"
+    }
+
+    typeMap := map[string]string{
+        "vless":   "vless",
+        "vmess":   "vmess",
+        "trojan":  "trojan",
+        "ss":      "ss",
+        "mtproto": "mtproto",
+        "proxy":   "http",
+    }
+
+    if mapped, ok := typeMap[maxType]; ok {
+        return mapped
+    }
+    return "unknown"
 }
 
 func (s *Scraper) getConfigPath() (string, error) {
@@ -418,39 +424,44 @@ func (s *Scraper) ShowConfig() error {
 }
 
 func (s *Scraper) AddSource(url string, sourceType string) error {
-	if s.Config == nil {
-		if err := s.LoadConfig(); err != nil {
-			return err
-		}
-	}
+    if s.Config == nil {
+        if err := s.LoadConfig(); err != nil {
+            return err
+        }
+    }
 
-	if sourceType == "" || sourceType == "auto" {
-		fmt.Printf("%s[ℹ] Auto-detecting type for: %s%s\n", Blue, url, Reset)
-		sourceType = s.DetectSourceType(url)
-		if sourceType == "unknown" {
-			return fmt.Errorf("could not detect source type for %s", url)
-		}
-		fmt.Printf("%s[✓] Detected type: %s%s\n", Green, sourceType, Reset)
-	}
 
-	switch sourceType {
-	case "vless", "vmess", "trojan", "ss", "ssr":
-		s.Config.Configs = append(s.Config.Configs, url)
-	case "mtproto":
-		s.Config.MTProto = append(s.Config.MTProto, url)
-	case "http", "https", "socks4", "socks5":
-		if s.Config.Proxies == nil {
-			s.Config.Proxies = make(map[string][]string)
-		}
-		s.Config.Proxies[sourceType] = append(s.Config.Proxies[sourceType], url)
-	default:
-		s.Config.Custom = append(s.Config.Custom, SourceConfig{
-			URLs:  []string{url},
-			PType: sourceType,
-		})
-	}
+    if sourceType == "" || sourceType == "auto" {
+        fmt.Printf("%s[ℹ] Auto-detecting type for: %s%s\n", Blue, url, Reset)
+        sourceType = s.DetectSourceType(url)
+        if sourceType == "unknown" {
+            return fmt.Errorf("could not detect source type for %s", url)
+        }
+        fmt.Printf("%s[✓] Detected type: %s%s\n", Green, sourceType, Reset)
+    }
 
-	return s.SaveConfig()
+
+    switch sourceType {
+    case "vless", "vmess", "trojan", "ss", "ssr":
+        s.Config.Configs = append(s.Config.Configs, url)
+    case "mtproto":
+        s.Config.MTProto = append(s.Config.MTProto, url)
+    case "http", "https", "socks4", "socks5":
+        if s.Config.Proxies == nil {
+            s.Config.Proxies = make(map[string][]string)
+        }
+        s.Config.Proxies[sourceType] = append(s.Config.Proxies[sourceType], url)
+    case "telegram":
+        s.Config.Telegram = append(s.Config.Telegram, url)
+    default:
+        s.Config.Custom = append(s.Config.Custom, SourceConfig{
+            URLs:  []string{url},
+            PType: sourceType,
+        })
+    }
+
+
+    return s.SaveConfig()
 }
 
 
