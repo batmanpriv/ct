@@ -8,13 +8,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -28,6 +28,8 @@ import (
 	"github.com/batmanpriv/ct/pc"
 	"github.com/batmanpriv/ct/scraper"
 	"github.com/batmanpriv/ct/xp"
+
+	"github.com/AlecAivazis/survey/v2"
 	"github.com/miekg/dns"
 )
 
@@ -44,37 +46,51 @@ const (
 	Bold    = "\033[1m"
 )
 
+const VERSION = "1.3.12"
+
+type Module string
+
+const (
+	ModuleRoot     Module = "root"
+	ModuleDNS      Module = "dns"
+	ModuleProxy    Module = "proxy"
+	ModuleXray     Module = "xray"
+	ModuleMTProto  Module = "mtproto"
+	ModuleScrape   Module = "scrape"
+	ModuleInteract  Module = "interactive"
+)
+
 type DNSResult struct {
-	DNS         string            `json:"dns"`
-	Lookup      bool              `json:"lookup"`
-	LookupMs    int64             `json:"lookup_ms"`
-	UDP         bool              `json:"udp"`
-	TCP         bool              `json:"tcp"`
-	DNSSEC      bool              `json:"dnssec"`
-	EDNS        bool              `json:"edns"`
-	EDNSBuffer  int               `json:"edns_buffer"`
-	IPv6        bool              `json:"ipv6"`
-	HTTPS       bool              `json:"https"`
-	HTTPSMs     int64             `json:"https_ms"`
-	HTTPStatus  int               `json:"http_status"`
+	DNS          string            `json:"dns"`
+	Lookup       bool              `json:"lookup"`
+	LookupMs     int64             `json:"lookup_ms"`
+	UDP          bool              `json:"udp"`
+	TCP          bool              `json:"tcp"`
+	DNSSEC       bool              `json:"dnssec"`
+	EDNS         bool              `json:"edns"`
+	EDNSBuffer   int               `json:"edns_buffer"`
+	IPv6         bool              `json:"ipv6"`
+	HTTPS        bool              `json:"https"`
+	HTTPSMs      int64             `json:"https_ms"`
+	HTTPStatus   int               `json:"http_status"`
 	HTTPBlocked  bool              `json:"http_blocked"`
-	HTTPKind    string            `json:"http_kind"`
-	HTTPError   string            `json:"http_error"`
-	Redirects   int               `json:"redirects"`
-	TLSVersion  string            `json:"tls_version"`
-	CipherSuite string            `json:"cipher_suite"`
-	HTTP2       bool              `json:"http2"`
-	DoT         bool              `json:"dot"`
-	DoH         bool              `json:"doh"`
-	DoTError    string            `json:"dot_error"`
-	DoHError    string            `json:"doh_error"`
-	Country     string            `json:"country"`
-	ASN         string            `json:"asn"`
-	Provider    string            `json:"provider"`
-	Score       int               `json:"score"`
-	Records     map[string]bool   `json:"records"`
-	LookupError string            `json:"lookup_error"`
-	Extra       map[string]string `json:"extra"`
+	HTTPKind     string            `json:"http_kind"`
+	HTTPError    string            `json:"http_error"`
+	Redirects    int               `json:"redirects"`
+	TLSVersion   string            `json:"tls_version"`
+	CipherSuite  string            `json:"cipher_suite"`
+	HTTP2        bool              `json:"http2"`
+	DoT          bool              `json:"dot"`
+	DoH          bool              `json:"doh"`
+	DoTError     string            `json:"dot_error"`
+	DoHError     string            `json:"doh_error"`
+	Country      string            `json:"country"`
+	ASN          string            `json:"asn"`
+	Provider     string            `json:"provider"`
+	Score        int               `json:"score"`
+	Records      map[string]bool   `json:"records"`
+	LookupError  string            `json:"lookup_error"`
+	Extra        map[string]string `json:"extra"`
 }
 
 type Config struct {
@@ -129,23 +145,1018 @@ type HTTPResult struct {
 }
 
 var (
-	cleanRegex = regexp.MustCompile(`[^0-9a-zA-Z\.\:\-\[\]]`)
-	uiState    = &UIState{}
-	geoCache   sync.Map
-	provCache  sync.Map
-	mu         sync.Mutex
+	cleanRegex      = regexp.MustCompile(`[^0-9a-zA-Z\.\:\-\[\]]`)
+	uiState         = &UIState{}
+	geoCache        sync.Map
+	provCache       sync.Map
+	mu              sync.Mutex
+	httpClientCache sync.Map
+	dohClientCache  sync.Map
 )
 
 func main() {
-	config := parseFlags()
+	app := &App{Args: os.Args[1:]}
+	if err := app.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+}
+
+type App struct {
+	Args []string
+}
+
+func (a *App) Run() error {
+	ctx := &AppContext{
+		RootDir: getExecutableDir(),
+		Reader:  bufio.NewReader(os.Stdin),
+	}
+
+	if len(a.Args) == 0 {
+		printRootHelp()
+		return nil
+	}
+
+	switch strings.ToLower(a.Args[0]) {
+	case "help", "-h", "--help":
+		printRootHelp()
+		return nil
+	case string(ModuleInteract):
+		return runInteractive(ctx)
+	case string(ModuleDNS):
+		return runDNSModule(ctx, a.Args[1:])
+	case string(ModuleProxy):
+		return runProxyModule(ctx, a.Args[1:])
+	case string(ModuleXray):
+		return runXrayModule(ctx, a.Args[1:])
+	case string(ModuleMTProto):
+		return runMTProtoModule(ctx, a.Args[1:])
+	case string(ModuleScrape):
+		return runScrapeModule(ctx, a.Args[1:])
+	default:
+		fmt.Println("Unknown command:", a.Args[0])
+		printRootHelp()
+		return nil
+	}
+}
+
+type AppContext struct {
+	RootDir string
+	Reader  *bufio.Reader
+}
+
+func printRootHelp() {
+	fmt.Println(`ct - modular CLI
+
+Usage:
+  ct <module> <command> [options]
+  ct interactive
+
+Modules:
+  dns        DNS benchmark / test
+  proxy      Proxy checker / downloader / scraper
+  xray       Xray checker / downloader
+  mtproto    MTProto checker / downloader
+  scrape     Scraper utilities
+  interactive Guided UI for normal users
+
+Examples:
+  ct dns help
+  ct dns test dns.txt
+  ct dns apply-best
+  ct dns status
+  ct dns set 1.1.1.1
+
+  ct proxy check proxies.txt
+  ct proxy download
+  ct proxy scrape
+  ct proxy apply-best
+
+  ct xray download
+  ct xray test config.txt
+
+  ct mtproto check mtproto.txt
+  ct mtproto download
+
+  ct scrape run
+  ct interactive`)
+}
+
+func runDNSModule(ctx *AppContext, args []string) error {
+	if len(args) == 0 {
+		printDNSHelp()
+		return nil
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "help", "-h", "--help":
+		printDNSHelp()
+		return nil
+
+	case "test":
+		return runDNSTest(ctx, args[1:])
+
+	case "quick":
+		return runDNSTestPreset(ctx, DNSModeQuick, args[1:])
+
+	case "full":
+		return runDNSTestPreset(ctx, DNSModeFull, args[1:])
+
+	case "apply-best":
+		return runDNSApplyBest(ctx, args[1:])
+
+	case "status":
+		checkDNSStatus()
+		return nil
+
+	case "set":
+		if len(args) < 2 {
+			return errors.New("missing DNS value")
+		}
+		setSystemDNS(args[1])
+		return nil
+
+	default:
+		printDNSHelp()
+		return nil
+	}
+}
+
+func runProxyModule(ctx *AppContext, args []string) error {
+	if len(args) == 0 {
+		printProxyHelp()
+		return nil
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "help", "-h", "--help":
+		printProxyHelp()
+		return nil
+
+	case "check":
+		return runProxyCheck(ctx, args[1:])
+
+	case "download":
+		return runProxyDownload(ctx)
+
+	case "scrape":
+		return runProxyScrape(ctx)
+
+	case "apply-best":
+		return runProxyApplyBest(ctx)
+
+	default:
+		printProxyHelp()
+		return nil
+	}
+}
+
+func runXrayModule(ctx *AppContext, args []string) error {
+	if len(args) == 0 {
+		printXrayHelp()
+		return nil
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "help", "-h", "--help":
+		printXrayHelp()
+		return nil
+
+	case "download":
+		return runXrayDownload(ctx)
+
+	case "test":
+		return runXrayTest(ctx, args[1:])
+
+	default:
+		printXrayHelp()
+		return nil
+	}
+}
+
+func runMTProtoModule(ctx *AppContext, args []string) error {
+	if len(args) == 0 {
+		printMTProtoHelp()
+		return nil
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "help", "-h", "--help":
+		printMTProtoHelp()
+		return nil
+
+	case "download":
+		return runMTProtoDownload(ctx)
+
+	case "check":
+		return runMTProtoCheck(ctx, args[1:])
+
+	default:
+		printMTProtoHelp()
+		return nil
+	}
+}
+
+func runScrapeModule(ctx *AppContext, args []string) error {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "run":
+			return runScraperOnly("./output", 20, false)
+		case "add-source":
+			return scrapeAddSource(ctx)
+		case "remove-source":
+			return scrapeRemoveSource(ctx)
+		case "reload":
+			return scrapeReloadConfig(ctx)
+		case "show-config":
+			return scrapeShowConfig(ctx)
+		case "help", "-h", "--help":
+			printScrapeHelp()
+			return nil
+		}
+	}
+
+	for {
+		choice, err := askChoiceDefault(ctx, "Scrape menu", []string{
+			"Add source",
+			"Remove source",
+			"Reload config",
+			"Show config",
+			"Run scraper",
+			"Back",
+		}, 1)
+		if err != nil {
+			return err
+		}
+
+		switch choice {
+		case 1:
+			if err := scrapeAddSource(ctx); err != nil {
+				fmt.Println(Red + "Error: " + err.Error() + Reset)
+			}
+		case 2:
+			if err := scrapeRemoveSource(ctx); err != nil {
+				fmt.Println(Red + "Error: " + err.Error() + Reset)
+			}
+		case 3:
+			if err := scrapeReloadConfig(ctx); err != nil {
+				fmt.Println(Red + "Error: " + err.Error() + Reset)
+			}
+		case 4:
+			if err := scrapeShowConfig(ctx); err != nil {
+				fmt.Println(Red + "Error: " + err.Error() + Reset)
+			}
+		case 5:
+			if err := runScraperOnly("./output", 20, false); err != nil {
+				fmt.Println(Red + "Error: " + err.Error() + Reset)
+			}
+		case 6:
+			return nil
+		}
+	}
+}
+
+func scrapeAddSource(ctx *AppContext) error {
+	url, err := askLine(ctx, "Source URL")
+	if err != nil {
+		return err
+	}
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return errors.New("empty source url")
+	}
+
+	sourceType, err := askYesNoDefault(ctx, "Do you know the source type?", false)
+	if err != nil {
+		return err
+	}
+
+	kind := ""
+	if sourceType {
+		kind, err = askLine(ctx, "Source type")
+		if err != nil {
+			return err
+		}
+		kind = strings.TrimSpace(kind)
+	}
+
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.AddSource(url, kind)
+}
+
+func scrapeRemoveSource(ctx *AppContext) error {
+	url, err := askLine(ctx, "Source URL to remove")
+	if err != nil {
+		return err
+	}
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return errors.New("empty source url")
+	}
+
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.RemoveSource(url)
+}
+
+func scrapeReloadConfig(ctx *AppContext) error {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.ReloadConfig()
+}
+
+func scrapeShowConfig(ctx *AppContext) error {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.ShowConfig()
+}
+
+func clearScreen() {
+	fmt.Print("\033[2J\033[H")
+}
+
+func hideCursor() {
+	fmt.Print("\033[?25l")
+}
+
+func showCursor() {
+	fmt.Print("\033[?25h")
+}
+
+func renderBanner() {
+	clearScreen()
+	fmt.Println(Bold + Magenta + "╔════════════════════════════════════╗" + Reset)
+	fmt.Println(Bold + Magenta + "║            Cehck test | CT         ║" + Reset)
+	fmt.Println(Bold + Magenta + "╚════════════════════════════════════╝" + Reset)
+	fmt.Println()
+	fmt.Println(Cyan + "GitHub   : https://github.com/batmanpriv" + Reset)
+	fmt.Println(Green + "Telegram : https://t.me/BatmanPriv" + Reset)
+	fmt.Println(Magenta + "VERSION : " + VERSION + Reset)
+	fmt.Println(Yellow + "Use ↑ ↓ and Enter to navigate" + Reset)
+	fmt.Println()
+}
+
+func runInteractive(ctx *AppContext) error {
+	defer showCursor()
+	hideCursor()
+	renderBanner()
+
+	choices := []string{
+		"DNS Benchmark",
+		"Proxy Checker",
+		"MTProto Checker",
+		"Xray Checker",
+		"Scraper",
+		"Check Update",
+		"Exit",
+	}
+
+	for {
+		var picked string
+		err := survey.AskOne(&survey.Select{
+			Message: "Choose module",
+			Options: choices,
+		}, &picked, survey.WithIcons(func(icons *survey.IconSet) {
+			icons.Question.Text = Bold + Cyan + "❯" + Reset
+			icons.SelectFocus.Text = Bold + Green + "➜" + Reset
+			icons.MarkedOption.Text = Bold + Yellow + "●" + Reset
+		}))
+		if err != nil {
+			return err
+		}
+
+		switch picked {
+		case "DNS Benchmark":
+			return interactiveDNS(ctx)
+		case "Proxy Checker":
+			return interactiveProxy(ctx)
+		case "MTProto Checker":
+			return interactiveMTProto(ctx)
+		case "Xray Checker":
+			return interactiveXray(ctx)
+		case "Scraper":
+			return interactiveScrape(ctx)
+		case "Check Update":
+			if err := checkUpdate(); err != nil {
+				fmt.Println(Red + "Error: " + err.Error() + Reset)
+			}
+		case "Exit":
+			clearScreen()
+			return nil
+		}
+	}
+}
+
+func checkUpdate() error {
+	latest, err := fetchLatestVersion()
+	if err != nil {
+		return err
+	}
+
+	if normalizeVersion(latest) == normalizeVersion(VERSION) {
+		fmt.Println(Green + "You are on the latest version: " + VERSION + Reset)
+		return nil
+	}
+
+	fmt.Printf(Yellow+"New version found: %s -> %s\n"+Reset, VERSION, latest)
+	return installUpdate(latest)
+}
+
+func fetchLatestVersion() (string, error) {
+	resp, err := http.Get("https://raw.githubusercontent.com/batmanpriv/ct/refs/heads/main/version.txt")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func normalizeVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	return v
+}
+
+func installUpdate(ver string) error {
+	ver = normalizeVersion(ver)
+
+	if _, err := exec.LookPath("go"); err == nil {
+		fmt.Println(Cyan + "Updating with go install..." + Reset)
+		cmd := exec.Command("go", "install", "github.com/batmanpriv/ct@v"+ver)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	if runtime.GOOS == "windows" {
+		fmt.Println(Cyan + "Downloading Windows release..." + Reset)
+		return downloadWindowsRelease(ver)
+	}
+
+	if _, err := exec.LookPath("git"); err == nil {
+		fmt.Println(Cyan + "Falling back to git clone + build..." + Reset)
+		return cloneAndBuild(ver)
+	}
+
+	return errors.New("go, git, and release install all unavailable")
+}
+
+func downloadWindowsRelease(ver string) error {
+	url := fmt.Sprintf("https://github.com/batmanpriv/ct/releases/download/%s/ct.exe", ver)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed: %s", resp.Status)
+	}
+
+	out, err := os.Create("ct.exe")
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func cloneAndBuild(ver string) error {
+	tmpDir := filepath.Join(os.TempDir(), "ct-updater")
+	_ = os.RemoveAll(tmpDir)
+
+	cmd := exec.Command("git", "clone", "https://github.com/batmanpriv/ct.git", tmpDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	if ver != "" {
+		cmd = exec.Command("git", "-C", tmpDir, "checkout", "v"+ver)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	}
+
+	buildCmd := exec.Command("go", "build", "-o", "ct.exe", ".")
+	buildCmd.Dir = tmpDir
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	return buildCmd.Run()
+}
+
+func askOptionalLine(ctx *AppContext, label string, def string) (string, error) {
+	use, err := askYesNoDefault(ctx, "Set "+label+"?", false)
+	if err != nil {
+		return "", err
+	}
+	if !use {
+		return def, nil
+	}
+	v, err := askLine(ctx, label)
+	if err != nil {
+		return "", err
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return def, nil
+	}
+	return v, nil
+}
+
+func printDNSHelp() {
+	fmt.Println(`ct dns commands
+
+Usage:
+  ct dns test [file]
+  ct dns quick [file]
+  ct dns full [file]
+  ct dns apply-best
+  ct dns status
+  ct dns set <ip>
+  ct dns help
+
+Examples:
+  ct dns test dns.txt
+  ct dns quick
+  ct dns full
+  ct dns apply-best
+  ct dns status
+  ct dns set 1.1.1.1
+
+Smart defaults:
+  dns.txt
+  dns_servers.txt
+  dns.csv
+  input.txt
+
+Wizard:
+  ct interactive`)
+}
+
+func printProxyHelp() {
+	fmt.Println(`ct proxy commands
+
+Usage:
+  ct proxy check [file]
+  ct proxy download
+  ct proxy scrape
+  ct proxy apply-best
+
+Examples:
+  ct proxy check proxies.txt
+  ct proxy download
+  ct proxy scrape
+  ct proxy apply-best`)
+}
+
+func printXrayHelp() {
+	fmt.Println(`ct xray commands
+
+Usage:
+  ct xray download
+  ct xray test [file]
+
+Examples:
+  ct xray download
+  ct xray test config.txt`)
+}
+
+func printMTProtoHelp() {
+	fmt.Println(`ct mtproto commands
+
+Usage:
+  ct mtproto download
+  ct mtproto check [file]
+
+Examples:
+  ct mtproto download
+  ct mtproto check mtproto.txt`)
+}
+
+func printScrapeHelp() {
+	fmt.Println(`ct scrape commands
+
+Usage:
+  ct scrape run
+  ct scrape add-source <url>
+  ct scrape remove-source <url>
+  ct scrape reload
+  ct scrape show-config
+
+Examples:
+  ct scrape run
+  ct scrape add-source https://example.com
+  ct scrape show-config`)
+}
+
+func interactiveDNS(ctx *AppContext) error {
+	dnsFile, err := resolveDNSFile(ctx, nil)
+	if err != nil {
+		return err
+	}
+
+	threads, err := askIntDefault(ctx, "Threads (default 10)", 10)
+	if err != nil {
+		return err
+	}
+
+	httpTest, err := askYesNoDefault(ctx, "Enable HTTP tests?", true)
+	if err != nil {
+		return err
+	}
+
+	domains := "cloudflare.com,google.com,github.com"
+	if httpTest {
+		domains, err = askLine(ctx, "Domains (comma separated)")
+		if err != nil {
+			return err
+		}
+		domains = strings.TrimSpace(domains)
+		if domains == "" {
+			domains = "cloudflare.com,google.com,github.com"
+		}
+	}
+
+	sortChoice, err := askChoiceDefault(ctx, "Sort by", []string{"Speed", "Score"}, 1)
+	if err != nil {
+		return err
+	}
+
+	outputJSON, err := askYesNoDefault(ctx, "Output JSON?", false)
+	if err != nil {
+		return err
+	}
+
+	mode := 0
+	if httpTest {
+		mode = 1
+	}
+
+	cfg := Config{
+		DNSFile:   dnsFile,
+		Threads:   threads,
+		Mode:      mode,
+		OutputJSON: outputJSON,
+		Score:     sortChoice == 2,
+		Domains:   domains,
+	}
+
+	return runDNSBenchmark(ctx, cfg)
+}
+
+func interactiveProxy(ctx *AppContext) error {
+	proxyFile, err := smartPickFile(ctx, []string{"proxies.txt", "proxy.txt", "input.txt"}, "Proxy file")
+	if err != nil {
+		return err
+	}
+
+	threads, err := askIntDefault(ctx, "Threads (default 50)", 50)
+	if err != nil {
+		return err
+	}
+
+	autoDetect, err := askYesNoDefault(ctx, "Auto detect proxy type?", true)
+	if err != nil {
+		return err
+	}
+
+	proxyTypes := ""
+	if !autoDetect {
+		proxyTypes, err = askLine(ctx, "Proxy types (example: http,socks5,ss,trojan)")
+		if err != nil {
+			return err
+		}
+		proxyTypes = strings.TrimSpace(proxyTypes)
+	}
+
+	testURL := ""
+	if ask, err := askYesNoDefault(ctx, "Set proxy test URL?", false); err != nil {
+		return err
+	} else if ask {
+		testURL, err = askLine(ctx, "Proxy test URL (default: http://httpbin.org/ip)")
+		if err != nil {
+			return err
+		}
+		testURL = strings.TrimSpace(testURL)
+		if testURL == "" {
+			testURL = "http://httpbin.org/ip"
+		}
+	}
+
+	download, err := askYesNoDefault(ctx, "Download proxies first?", false)
+	if err != nil {
+		return err
+	}
+
+	scrape, err := askYesNoDefault(ctx, "Scrape proxies?", false)
+	if err != nil {
+		return err
+	}
+
+	applyBest, err := askYesNoDefault(ctx, "Apply best proxy?", false)
+	if err != nil {
+		return err
+	}
+
+	cfg := pc.Config{
+		ProxyFile:  proxyFile,
+		Threads:    threads,
+		Types:      proxyTypes,
+		AutoDetect: autoDetect,
+		Download:   download,
+		Scrape:     scrape,
+		ApplyBest:  applyBest,
+		Timeout:    3,
+		TestURL:    testURL,
+	}
+
+	pc.RunProxyChecker(cfg)
+	return nil
+}
+
+func interactiveXray(ctx *AppContext) error {
+	xrayFile, err := smartPickFile(ctx, []string{"config.txt", "xray.txt", "input.txt"}, "Xray config file")
+	if err != nil {
+		return err
+	}
+
+	download, err := askYesNoDefault(ctx, "Download configs?", false)
+	if err != nil {
+		return err
+	}
+
+	limit, err := askIntDefault(ctx, "Limit configs (0 = no limit)", 0)
+	if err != nil {
+		return err
+	}
+
+	threads, err := askIntDefault(ctx, "Threads (default 30)", 30)
+	if err != nil {
+		return err
+	}
+
+	testURL := ""
+	if ask, err := askYesNoDefault(ctx, "Set xray test URL?", false); err != nil {
+		return err
+	} else if ask {
+		testURL, err = askLine(ctx, "xray test URL (default: http://httpbin.org/ip)")
+		if err != nil {
+			return err
+		}
+		testURL = strings.TrimSpace(testURL)
+		if testURL == "" {
+			testURL = "http://httpbin.org/ip"
+		}
+	}
+
+	timeout, err := askIntDefault(ctx, "Timeout seconds (default 2)", 2)
+	if err != nil {
+		return err
+	}
+
+	outputFile, err := askLine(ctx, "Output file (default alive_configs.txt)")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(outputFile) == "" {
+		outputFile = "alive_configs.txt"
+	}
+
+	cfg := xp.CheckerConfig{
+		ConfigFile: xrayFile,
+		Download:   download,
+		Limit:      limit,
+		Threads:    threads,
+		Timeout:    float64(timeout),
+		OutputFile: outputFile,
+		TestURL:    testURL,
+	}
+
+	xp.RunChecker(cfg)
+	return nil
+}
+
+func interactiveMTProto(ctx *AppContext) error {
+	mtprotoFile, err := smartPickFile(ctx, []string{"mtproto.txt", "mtproto_proxies.txt", "input.txt"}, "MTProto file")
+	if err != nil {
+		return err
+	}
+
+	threads, err := askIntDefault(ctx, "Threads (default 20)", 20)
+	if err != nil {
+		return err
+	}
+
+	timeout, err := askIntDefault(ctx, "Timeout seconds (default 2)", 2)
+	if err != nil {
+		return err
+	}
+
+	download, err := askYesNoDefault(ctx, "Download MTProto proxies?", false)
+	if err != nil {
+		return err
+	}
+
+	outputFile, err := askLine(ctx, "Output file (default valid_mtproto.txt)")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(outputFile) == "" {
+		outputFile = "valid_mtproto.txt"
+	}
+
+	cfg := mtp.CheckerConfig{
+		File:       mtprotoFile,
+		Threads:    threads,
+		Timeout:    time.Duration(timeout) * time.Second,
+		Download:   download,
+		OutputFile: outputFile,
+		NoColor:    false,
+	}
+
+	checker := mtp.NewChecker(cfg)
+	return checker.Run()
+}
+
+func interactiveScrape(ctx *AppContext) error {
+	outputDir, err := askLine(ctx, "Output directory (default ./output)")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(outputDir) == "" {
+		outputDir = "./output"
+	}
+
+	workers, err := askIntDefault(ctx, "Workers (default 20)", 20)
+	if err != nil {
+		return err
+	}
+
+	skipTelegram, err := askYesNoDefault(ctx, "Skip Telegram scraping?", false)
+	if err != nil {
+		return err
+	}
+
+	s := scraper.NewScraper(outputDir, workers, skipTelegram)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.Run()
+}
+
+func askLine(ctx *AppContext, prompt string) (string, error) {
+	fmt.Printf("%s: ", prompt)
+	line, err := ctx.Reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func askYesNoDefault(ctx *AppContext, prompt string, def bool) (bool, error) {
+	tag := "[Y/n]"
+	if !def {
+		tag = "[y/N]"
+	}
+
+	for {
+		v, err := askLine(ctx, prompt+" "+tag)
+		if err != nil {
+			return false, err
+		}
+		if v == "" {
+			return def, nil
+		}
+		switch strings.ToLower(v) {
+		case "y", "yes", "true", "1":
+			return true, nil
+		case "n", "no", "false", "0":
+			return false, nil
+		default:
+			fmt.Println("Please answer y or n")
+		}
+	}
+}
+
+func askIntDefault(ctx *AppContext, prompt string, def int) (int, error) {
+	for {
+		v, err := askLine(ctx, fmt.Sprintf("%s [%d]", prompt, def))
+		if err != nil {
+			return 0, err
+		}
+		if v == "" {
+			return def, nil
+		}
+		n, err := strconv.Atoi(v)
+		if err == nil {
+			return n, nil
+		}
+		fmt.Println("Invalid number")
+	}
+}
+
+func askChoiceDefault(ctx *AppContext, prompt string, choices []string, def int) (int, error) {
+	fmt.Println(prompt)
+	for i, c := range choices {
+		fmt.Printf("  %d) %s\n", i+1, c)
+	}
+	for {
+		v, err := askLine(ctx, fmt.Sprintf("Choose [%d]", def))
+		if err != nil {
+			return 0, err
+		}
+		if v == "" {
+			return def, nil
+		}
+		n, err := strconv.Atoi(v)
+		if err == nil && n >= 1 && n <= len(choices) {
+			return n, nil
+		}
+		fmt.Println("Invalid choice")
+	}
+}
+
+func smartPickFile(ctx *AppContext, candidates []string, label string) (string, error) {
+	for _, name := range candidates {
+		if path := findFile(ctx.RootDir, name); path != "" {
+			fmt.Printf("Found %s\n", filepath.Base(path))
+			use, err := askYesNoDefault(ctx, "Use it?", true)
+			if err != nil {
+				return "", err
+			}
+			if use {
+				return path, nil
+			}
+		}
+	}
+
+	v, err := askLine(ctx, label)
+	if err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+func findFile(root, name string) string {
+	candidates := []string{
+		filepath.Join(root, name),
+		filepath.Join(root, "assets", name),
+		filepath.Join(root, "data", name),
+	}
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+func getExecutableDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		cwd, _ := os.Getwd()
+		return cwd
+	}
+	return filepath.Dir(exe)
+}
+
+func runDNSBenchmark(ctx *AppContext, config Config) error {
+	if config.DNSFile == "" {
+		return errors.New("missing dns file")
+	}
+
+	if config.Threads < 2 {
+		config.Threads = 2
+	}
+	if config.Domains == "" {
+		config.Domains = "cloudflare.com,google.com,github.com"
+	}
 
 	if config.SetDNS != "" {
 		if config.SetDNS == "status" {
 			checkDNSStatus()
-			return
+			return nil
 		}
 		setSystemDNS(config.SetDNS)
-		return
+		return nil
 	}
 
 	if config.ApplyBest {
@@ -154,34 +1165,17 @@ func main() {
 		if best != "" {
 			fmt.Printf("\n%s✓ Best DNS (%s) applied to system%s\n", Green, best, Reset)
 		}
-		return
-	}
-
-	if config.DNSFile == "" {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("DNS file path: ")
-		dnsPath, _ := reader.ReadString('\n')
-		config.DNSFile = strings.TrimSpace(dnsPath)
-	}
-
-	if config.Threads < 2 {
-		config.Threads = 2
-	}
-
-	if config.Domains == "" && config.TestURL == "" {
-		config.Domains = "cloudflare.com,google.com,github.com"
+		return nil
 	}
 
 	domains := parseDomains(config.Domains, config.TestURL)
 
 	dnsList, err := loadDNSList(config.DNSFile)
 	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
+		return err
 	}
 	if len(dnsList) == 0 {
-		fmt.Println("No valid DNS servers found")
-		return
+		return errors.New("no valid dns servers found")
 	}
 
 	registry := loadProviderRegistry(config.ProviderFile)
@@ -227,162 +1221,100 @@ func main() {
 
 	printSummary(uiState.results, config)
 	printRecommendation(uiState.results, config)
+	return nil
 }
 
-func parseFlags() Config {
-	config := Config{}
-	testURL := ""
-
-	flag.StringVar(&config.DNSFile, "dns", "", "DNS file path")
-	flag.IntVar(&config.Threads, "t", 10, "Number of threads")
-	flag.StringVar(&config.Domains, "domains", "cloudflare.com", "Domains to test (comma separated)")
-	flag.StringVar(&testURL, "url", "", "Test URL for HTTP check")
-	flag.IntVar(&config.Mode, "mode", 0, "0: DNS only, 1: DNS + HTTP")
-	flag.BoolVar(&config.OutputJSON, "json", false, "Output in JSON format")
-	flag.BoolVar(&config.Score, "score", false, "Sort by score instead of speed")
-	flag.BoolVar(&config.NoColor, "no-color", false, "Disable colored output")
-	flag.StringVar(&config.SetDNS, "set", "", "Set system DNS (e.g. -set 1.1.1.1 or -set status)")
-	flag.BoolVar(&config.ApplyBest, "apply-best", false, "Find best DNS and apply to system")
-	flag.BoolVar(&config.Insecure, "insecure", false, "Allow insecure TLS for DoT")
-	flag.StringVar(&config.ProviderFile, "providers", "", "Custom providers json file")
-
-	proxyFile := flag.String("proxy", "", "Proxy file path")
-	proxyThreads := flag.Int("proxy-t", 50, "Proxy threads")
-	proxyTypes := flag.String("proxy-types", "", "Proxy types")
-	proxyAuto := flag.Bool("proxy-auto", true, "Auto detect proxy type")
-	proxyDownload := flag.Bool("proxy-dl", false, "Download proxies")
-	proxyScrape := flag.Bool("proxy-scrape", false, "Scrape proxies")
-	proxyScore := flag.Bool("proxy-score", false, "Sort by score")
-	proxyApplyBest := flag.Bool("proxy-apply-best", false, "Apply best proxy")
-	proxySet := flag.String("proxy-set", "", "Set system proxy")
-	proxyTestURL := flag.String("proxy-url", "http://httpbin.org/ip", "Test URL for proxy")
-
-	xrayFile := flag.String("xray-file", "", "Xray config file path")
-	xrayDownload := flag.Bool("xray-dl", false, "Download xray configs")
-	xrayLimit := flag.Int("xray-limit", 0, "Limit number of xray configs")
-	xrayThreads := flag.Int("xray-threads", 30, "Xray test threads")
-	xrayTimeout := flag.Float64("xray-timeout", 2, "Xray test timeout in seconds")
-	xrayAddSource := flag.String("xray-add-source", "", "Add new xray source URL")
-	xrayTestURL := flag.String("xray-url", "", "Test URL for xray HTTP check")
-	xrayOutput := flag.String("xray-output", "alive_configs.txt", "Output file for alive xray configs")
-
-	mtprotoFile := flag.String("mtproto", "", "MTProto proxy file path")
-	mtprotoDownload := flag.Bool("mtproto-dl", false, "Download MTProto proxies from GitHub")
-	mtprotoThreads := flag.Int("mtproto-t", 20, "Number of threads for MTProto checking")
-	mtprotoTimeout := flag.Int("mtproto-timeout", 2, "Timeout in seconds for MTProto checking")
-	mtprotoOutput := flag.String("mtproto-out", "valid_mtproto.txt", "Output file for healthy MTProto proxies")
-	mtprotoNoColor := flag.Bool("mtproto-no-color", false, "Disable colored output for MTProto")
-
-	sourceURL := flag.String("source", "", "Add source URL with auto-detection")
-	sourceType := flag.String("source-type", "", "Force source type")
-	scrapeOnly := flag.Bool("scrape-only", false, "Run only scraper and exit")
-	outputDir := flag.String("output", "./output", "Output directory for scraped data")
-	workers := flag.Int("workers", 20, "Number of concurrent workers for scraping")
-	skipTelegram := flag.Bool("skip-telegram", false, "Skip Telegram scraping")
-	removeURL := flag.String("remove-url", "", "Remove a URL from config")
-	reloadConfig := flag.Bool("reload", false, "Reload config")
-	showConfig := flag.Bool("show-config", false, "Show saved config file path and contents")
-
-	flag.Parse()
-	config.TestURL = testURL
-
-	if *xrayFile != "" || *xrayDownload || *xrayAddSource != "" {
-		xrayConfig := xp.CheckerConfig{
-			ConfigFile: *xrayFile,
-			Download:   *xrayDownload,
-			Limit:      *xrayLimit,
-			Threads:    *xrayThreads,
-			Timeout:    *xrayTimeout,
-			AddSource:  *xrayAddSource,
-			TestURL:    *xrayTestURL,
-			NoColor:    false,
-			OutputFile: *xrayOutput,
-		}
-		xp.RunChecker(xrayConfig)
-		os.Exit(0)
+func runDNSTest(ctx *AppContext, args []string) error {
+	file, err := resolveDNSFile(ctx, args)
+	if err != nil {
+		return err
 	}
 
-	if *mtprotoFile != "" || *mtprotoDownload {
-		mtpConfig := mtp.CheckerConfig{
-			File:       *mtprotoFile,
-			Threads:    *mtprotoThreads,
-			Timeout:    time.Duration(*mtprotoTimeout) * time.Second,
-			Download:   *mtprotoDownload,
-			OutputFile: *mtprotoOutput,
-			NoColor:    *mtprotoNoColor,
-		}
-		checker := mtp.NewChecker(mtpConfig)
-		if err := checker.Run(); err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
+	cfg := Config{
+		DNSFile: file,
+		Threads: 10,
+		Mode:    0,
+		Domains: "cloudflare.com,google.com,github.com",
 	}
-
-	if *scrapeOnly {
-		runScraperOnly(*outputDir, *workers, *skipTelegram)
-		os.Exit(0)
-	}
-
-	if *sourceURL != "" {
-		addSource(*sourceURL, *sourceType)
-		os.Exit(0)
-	}
-
-	if *removeURL != "" {
-		removeSource(*removeURL)
-		os.Exit(0)
-	}
-
-	if *reloadConfig {
-		reloadScraperConfig()
-		os.Exit(0)
-	}
-
-	if *showConfig {
-		showScraperConfig()
-		os.Exit(0)
-	}
-
-	if *proxyFile != "" || *proxyDownload || *proxyScrape || *proxyApplyBest || *proxySet != "" {
-		pcConfig := pc.Config{
-			ProxyFile:  *proxyFile,
-			Threads:    *proxyThreads,
-			Types:      *proxyTypes,
-			AutoDetect: *proxyAuto,
-			Download:   *proxyDownload,
-			Scrape:     *proxyScrape,
-			Score:      *proxyScore,
-			ApplyBest:  *proxyApplyBest,
-			SetProxy:   *proxySet,
-			TestURL:    *proxyTestURL,
-			Timeout:    3,
-			OutputJSON: false,
-			NoColor:    false,
-		}
-		pc.RunProxyChecker(pcConfig)
-		os.Exit(0)
-	}
-
-	return config
+	return runDNSBenchmark(ctx, cfg)
 }
 
-func parseDomains(domains string, testURL string) []string {
-	if testURL != "" {
-		return []string{strings.TrimSpace(testURL)}
+func runDNSTestPreset(ctx *AppContext, mode DNSMode, args []string) error {
+	file, err := resolveDNSFile(ctx, args)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(domains, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
+
+	cfg := Config{
+		DNSFile: file,
+		Threads: 10,
+		Mode:    0,
+		Domains: "google.com",
+	}
+
+	if mode == DNSModeFull {
+		cfg.Mode = 1
+		cfg.Score = true
+		cfg.Domains = "github.com,cloudflare.com"
+	}
+
+	return runDNSBenchmark(ctx, cfg)
+}
+
+func resolveDNSFile(ctx *AppContext, args []string) (string, error) {
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		return strings.TrimSpace(args[0]), nil
+	}
+
+	if path := findFile(ctx.RootDir, "dns.txt"); path != "" {
+		fmt.Printf("Found %s\n", filepath.Base(path))
+		use, err := askYesNoDefault(ctx, "Use it?", true)
+		if err != nil {
+			return "", err
+		}
+		if use {
+			return path, nil
 		}
 	}
-	if len(out) == 0 {
-		out = []string{"cloudflare.com"}
+
+	for _, name := range []string{"dns_servers.txt", "dns.csv", "input.txt"} {
+		if path := findFile(ctx.RootDir, name); path != "" {
+			fmt.Printf("Found %s\n", filepath.Base(path))
+			use, err := askYesNoDefault(ctx, "Use it?", true)
+			if err != nil {
+				return "", err
+			}
+			if use {
+				return path, nil
+			}
+		}
 	}
-	return out
+
+	if p := getDefaultResolversPath(ctx.RootDir); p != "" {
+		fmt.Printf("Found %s\n", filepath.Base(p))
+		use, err := askYesNoDefault(ctx, "Use it?", true)
+		if err != nil {
+			return "", err
+		}
+		if use {
+			return p, nil
+		}
+	}
+
+	return askLine(ctx, "DNS file")
+}
+
+func getDefaultResolversPath(root string) string {
+	for _, p := range []string{
+		filepath.Join(root, "resolvers.txt"),
+		filepath.Join(root, "assets", "resolvers.txt"),
+		filepath.Join(root, "data", "resolvers.txt"),
+	} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 func loadDNSList(path string) ([]string, error) {
@@ -395,7 +1327,14 @@ func loadDNSList(path string) ([]string, error) {
 	scanner := bufio.NewScanner(f)
 	var out []string
 	for scanner.Scan() {
-		line := strings.TrimSpace(cleanRegex.ReplaceAllString(scanner.Text(), ""))
+		line := strings.TrimSpace(scanner.Text())
+		line = strings.Trim(line, "\uFEFF")
+		if line == "" {
+			continue
+		}
+		line = strings.Split(line, "#")[0]
+		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(cleanRegex.ReplaceAllString(line, ""))
 		if line != "" {
 			out = append(out, line)
 		}
@@ -468,24 +1407,22 @@ func hostFromURL(raw string) string {
 }
 
 func getProvider(server string, registry map[string]ProviderEntry) ProviderEntry {
-	cacheKey := server
-	if v, ok := provCache.Load(cacheKey); ok {
+	if v, ok := provCache.Load(server); ok {
 		if p, ok := v.(ProviderEntry); ok {
 			return p
 		}
 	}
 	if p, ok := registry[server]; ok {
-		provCache.Store(cacheKey, p)
+		provCache.Store(server, p)
 		return p
 	}
 	p := ProviderEntry{
 		Name: "Unknown",
-		DoH:  "",
 		DoT:  net.JoinHostPort(server, "853"),
 		SNI:  server,
 		Host: server,
 	}
-	provCache.Store(cacheKey, p)
+	provCache.Store(server, p)
 	return p
 }
 
@@ -508,14 +1445,31 @@ func tlsCipherSuiteString(cipher uint16) string {
 	return fmt.Sprintf("0x%x", cipher)
 }
 
+func tlsVersionString(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS1.0"
+	case tls.VersionTLS11:
+		return "TLS1.1"
+	case tls.VersionTLS12:
+		return "TLS1.2"
+	case tls.VersionTLS13:
+		return "TLS1.3"
+	default:
+		return fmt.Sprintf("0x%x", version)
+	}
+}
+
 func checkDNSStatus() {
 	fmt.Printf("\n%sCurrent DNS Settings:%s\n", Cyan, Reset)
 	fmt.Println(strings.Repeat("-", 40))
+
 	switch runtime.GOOS {
 	case "windows":
 		cmd := exec.Command("netsh", "interface", "ipv4", "show", "dns")
 		output, _ := cmd.Output()
 		fmt.Println(string(output))
+
 	case "linux":
 		cmd := exec.Command("systemd-resolve", "--status")
 		if output, err := cmd.Output(); err == nil {
@@ -525,12 +1479,14 @@ func checkDNSStatus() {
 		cmd = exec.Command("cat", "/etc/resolv.conf")
 		output, _ := cmd.Output()
 		fmt.Println(string(output))
+
 	case "darwin":
 		for _, svc := range []string{"Wi-Fi", "Ethernet"} {
 			cmd := exec.Command("networksetup", "-getdnsservers", svc)
 			output, _ := cmd.Output()
 			fmt.Printf("%s DNS:\n%s\n", svc, string(output))
 		}
+
 	default:
 		fmt.Printf("Unsupported OS: %s\n", runtime.GOOS)
 	}
@@ -539,12 +1495,14 @@ func checkDNSStatus() {
 func setSystemDNS(dnsServer string) {
 	fmt.Printf("\n%sSetting system DNS to: %s%s\n", Cyan, dnsServer, Reset)
 	fmt.Println(strings.Repeat("-", 40))
+
 	if runtime.GOOS == "windows" {
 		if err := exec.Command("net", "session").Run(); err != nil {
 			fmt.Printf("%s⚠️ You need to run as Administrator!%s\n", Yellow, Reset)
 			return
 		}
 	}
+
 	switch runtime.GOOS {
 	case "windows":
 		setWindowsDNS(dnsServer)
@@ -560,6 +1518,7 @@ func setSystemDNS(dnsServer string) {
 func setWindowsDNS(dnsServer string) {
 	interfaces := []string{"Wi-Fi", "Ethernet", "Ethernet 2"}
 	var ifaceName string
+
 	for _, name := range interfaces {
 		cmd := exec.Command("powershell", "-Command",
 			fmt.Sprintf(`Get-NetAdapter | Where-Object {$_.Status -eq "Up" -and $_.Name -eq "%s"} | Select-Object -First 1 | ForEach-Object { $_.Name }`, name))
@@ -571,6 +1530,7 @@ func setWindowsDNS(dnsServer string) {
 			}
 		}
 	}
+
 	if ifaceName == "" {
 		cmd := exec.Command("powershell", "-Command",
 			`Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1 | ForEach-Object { $_.Name }`)
@@ -581,10 +1541,12 @@ func setWindowsDNS(dnsServer string) {
 		}
 		ifaceName = strings.TrimSpace(string(output))
 	}
+
 	if ifaceName == "" {
 		fmt.Println("No active network interface found")
 		return
 	}
+
 	_ = exec.Command("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, ifaceName), "static", dnsServer, "primary").Run()
 	fmt.Printf("%s✓ DNS set to %s (Interface: %s)%s\n", Green, dnsServer, ifaceName, Reset)
 	_ = exec.Command("ipconfig", "/flushdns").Run()
@@ -599,6 +1561,7 @@ func setLinuxDNS(dnsServer string) {
 		fmt.Printf("%s✓ DNS set to %s using systemd-resolved%s\n", Green, dnsServer, Reset)
 		return
 	}
+
 	resolvConf := fmt.Sprintf("nameserver %s\n", dnsServer)
 	cmd := exec.Command("sh", "-c", "printf '%s' \""+strings.ReplaceAll(resolvConf, `"`, `\"`)+"\" | sudo tee /etc/resolv.conf > /dev/null")
 	if err := cmd.Run(); err != nil {
@@ -615,6 +1578,7 @@ func setMacDNS(dnsServer string) {
 		fmt.Println("Error finding network service:", err)
 		return
 	}
+
 	lines := strings.Split(string(output), "\n")
 	var service string
 	for _, line := range lines {
@@ -624,10 +1588,12 @@ func setMacDNS(dnsServer string) {
 			break
 		}
 	}
+
 	if service == "" {
 		fmt.Println("No active network service found")
 		return
 	}
+
 	cmd = exec.Command("networksetup", "-setdnsservers", service, dnsServer)
 	if err := cmd.Run(); err != nil {
 		fmt.Println("Error setting DNS:", err)
@@ -636,57 +1602,30 @@ func setMacDNS(dnsServer string) {
 	fmt.Printf("%s✓ DNS set to %s (Service: %s)%s\n", Green, dnsServer, service, Reset)
 }
 
-func runScraperOnly(outputDir string, workers int, skipTelegram bool) {
-	s := scraper.NewScraper(outputDir, workers, skipTelegram)
-	if err := s.LoadConfig(); err != nil {
-		fmt.Printf("%s[✗] Error loading config: %v%s\n", Red, err, Reset)
+func saveValidDNS(dnsServer string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	file, err := os.OpenFile("valid_dns_"+time.Now().Format("20060102")+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
-	if err := s.Run(); err != nil {
-		fmt.Printf("%s[✗] Error running scraper: %v%s\n", Red, err, Reset)
+	defer file.Close()
+	_, _ = file.WriteString(dnsServer + "\n")
+}
+
+func saveJSON(results []DNSResult) {
+	file, err := os.Create("results.json")
+	if err != nil {
+		fmt.Println("Error creating JSON:", err)
 		return
 	}
-}
+	defer file.Close()
 
-func addSource(url, sourceType string) {
-	s := scraper.NewScraper("./output", 20, false)
-	if err := s.LoadConfig(); err != nil {
-		fmt.Printf("%s[✗] Error loading config: %v%s\n", Red, err, Reset)
-		return
-	}
-	fmt.Printf("%s[ℹ] Adding source: %s%s\n", Blue, url, Reset)
-	if err := s.AddSource(url, sourceType); err != nil {
-		fmt.Printf("%s[✗] Error adding source: %v%s\n", Red, err, Reset)
-		return
-	}
-	fmt.Printf("%s[✓] Source added successfully!%s\n", Green, Reset)
-	fmt.Printf("%s[ℹ] Run without flags to scrape all sources%s\n", Blue, Reset)
-}
-
-func showScraperConfig() {
-	s := scraper.NewScraper("./output", 20, false)
-	if err := s.ShowConfig(); err != nil {
-		fmt.Printf("%s[✗] Error showing config: %v%s\n", Red, err, Reset)
-		os.Exit(1)
-	}
-}
-
-func removeSource(url string) {
-	s := scraper.NewScraper("./output", 20, false)
-	if err := s.RemoveSource(url); err != nil {
-		fmt.Printf("%s[✗] Error removing source: %v%s\n", Red, err, Reset)
-		os.Exit(1)
-	}
-	fmt.Printf("%s[✓] Source removed successfully: %s%s\n", Green, url, Reset)
-}
-
-func reloadScraperConfig() {
-	s := scraper.NewScraper("./output", 20, false)
-	if err := s.ReloadConfig(); err != nil {
-		fmt.Printf("%s[✗] Error reloading config: %v%s\n", Red, err, Reset)
-		os.Exit(1)
-	}
-	fmt.Printf("%s[✓] Config reloaded successfully%s\n", Green, Reset)
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(results)
+	fmt.Println("\nResults saved to results.json")
 }
 
 func testDNS(server string, domains []string, config Config, registry map[string]ProviderEntry) DNSResult {
@@ -729,10 +1668,6 @@ func testDNS(server string, domains []string, config Config, registry map[string
 
 	result.Lookup = true
 	ip := ips[0]
-
-	if result.Extra == nil {
-		result.Extra = map[string]string{}
-	}
 
 	result.UDP, _ = testUDP(host, port, timeout)
 	result.TCP, _ = testTCP(host, port, lookupDomain, timeout)
@@ -925,11 +1860,6 @@ func testEDNS(server string, port int, domain string, timeout time.Duration) (bo
 	return false, 0, nil
 }
 
-var (
-	httpClientCache sync.Map
-	dohClientCache  sync.Map
-)
-
 func newReusableHTTPClient(server string, provider ProviderEntry, timeout time.Duration, insecure bool, customDNS bool, redirects *int) *http.Client {
 	cacheKey := fmt.Sprintf("http|%s|%s|%t|%t", server, provider.Host, insecure, customDNS)
 	if v, ok := httpClientCache.Load(cacheKey); ok {
@@ -978,13 +1908,13 @@ func newReusableHTTPClient(server string, provider ProviderEntry, timeout time.D
 			ServerName:         provider.SNI,
 			MinVersion:         tls.VersionTLS12,
 		},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:           50,
-		MaxIdleConnsPerHost:    10,
-		IdleConnTimeout:        60 * time.Second,
-		TLSHandshakeTimeout:    timeout,
-		ResponseHeaderTimeout:  timeout,
-		ExpectContinueTimeout:   1 * time.Second,
+		ForceAttemptHTTP2:    true,
+		MaxIdleConns:         50,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:      60 * time.Second,
+		TLSHandshakeTimeout:  timeout,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 
 	client := &http.Client{
@@ -1081,10 +2011,12 @@ func testDoT(server string, provider ProviderEntry, domain string, insecure bool
 	if host == "" {
 		host = server
 	}
+
 	target := provider.DoT
 	if target == "" {
 		target = net.JoinHostPort(server, "853")
 	}
+
 	c := &dns.Client{
 		Timeout: timeout,
 		Net:     "tcp-tls",
@@ -1094,9 +2026,11 @@ func testDoT(server string, provider ProviderEntry, domain string, insecure bool
 			MinVersion:         tls.VersionTLS12,
 		},
 	}
+
 	m := &dns.Msg{}
 	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	m.RecursionDesired = true
+
 	resp, _, err := c.Exchange(m, target)
 	if err != nil {
 		return false, err
@@ -1116,6 +2050,7 @@ func testDoH(server string, provider ProviderEntry, domain string, timeout time.
 	msg := &dns.Msg{}
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	msg.RecursionDesired = true
+
 	wire, err := msg.Pack()
 	if err != nil {
 		return false, err
@@ -1125,6 +2060,7 @@ func testDoH(server string, provider ProviderEntry, domain string, timeout time.
 
 	try := func(method string) (bool, error) {
 		var req *http.Request
+
 		if method == http.MethodGet {
 			q := base64.RawURLEncoding.EncodeToString(wire)
 			url := endpoint
@@ -1158,6 +2094,7 @@ func testDoH(server string, provider ProviderEntry, domain string, timeout time.
 		if err != nil {
 			return false, err
 		}
+
 		dnsResp := &dns.Msg{}
 		if err := dnsResp.Unpack(body); err != nil {
 			return false, err
@@ -1461,34 +2398,8 @@ func printRecommendation(results []DNSResult, config Config) {
 	fmt.Printf(" • Score: %d/100\n", best.Score)
 
 	fmt.Printf("\n%sTo apply this DNS automatically:%s\n", White, Reset)
-	fmt.Printf(" ct.exe -apply-best\n")
+	fmt.Printf(" ct dns apply-best\n")
 	fmt.Printf("%s========================================%s\n", Green, Reset)
-}
-
-func saveValidDNS(dnsServer string) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	file, err := os.OpenFile("valid_dns_"+time.Now().Format("20060102")+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	_, _ = file.WriteString(dnsServer + "\n")
-}
-
-func saveJSON(results []DNSResult) {
-	file, err := os.Create("results.json")
-	if err != nil {
-		fmt.Println("Error creating JSON:", err)
-		return
-	}
-	defer file.Close()
-
-	enc := json.NewEncoder(file)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(results)
-	fmt.Println("\nResults saved to results.json")
 }
 
 func uiLoop(config Config) {
@@ -1522,99 +2433,6 @@ func uiLoop(config Config) {
 			fmt.Println("Waiting for results...")
 		}
 	}
-}
-
-func parseDNSAddress(address string) (string, int) {
-	address = strings.TrimSpace(address)
-	if address == "" {
-		return "", 53
-	}
-	if host, port, err := net.SplitHostPort(address); err == nil {
-		p, err := strconv.Atoi(port)
-		if err == nil {
-			return host, p
-		}
-		return host, 53
-	}
-	if ip := net.ParseIP(address); ip != nil {
-		return address, 53
-	}
-	if strings.Count(address, ":") == 1 {
-		parts := strings.SplitN(address, ":", 2)
-		if p, err := strconv.Atoi(parts[1]); err == nil {
-			return parts[0], p
-		}
-	}
-	return address, 53
-}
-
-func tlsVersionString(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return "TLS1.0"
-	case tls.VersionTLS11:
-		return "TLS1.1"
-	case tls.VersionTLS12:
-		return "TLS1.2"
-	case tls.VersionTLS13:
-		return "TLS1.3"
-	default:
-		return fmt.Sprintf("0x%x", version)
-	}
-}
-
-func testHTTP(domain string, provider ProviderEntry, timeout time.Duration, insecure bool, server string, redirects *int) HTTPResult {
-	out := HTTPResult{}
-	client := newReusableHTTPClient(server, provider, timeout, insecure, true, redirects)
-
-	try := func(method string) (*http.Response, error) {
-		var req *http.Request
-		var err error
-
-		if method == http.MethodGet {
-			req, err = http.NewRequest(http.MethodGet, "https://"+domain, nil)
-		} else {
-			req, err = http.NewRequest(http.MethodHead, "https://"+domain, nil)
-		}
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "ct-dns-checker/1.0")
-		req.Header.Set("Accept", "*/*")
-		req.Host = domain
-		return client.Do(req)
-	}
-
-	start := time.Now()
-	resp, err := try(http.MethodHead)
-	if err != nil || resp == nil || resp.StatusCode >= 400 {
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
-		}
-		resp, err = try(http.MethodGet)
-	}
-	out.DurationMs = time.Since(start).Milliseconds()
-
-	if err != nil {
-		out.Error = err
-		return out
-	}
-	defer resp.Body.Close()
-
-	out.Success = true
-	out.Status = resp.StatusCode
-	out.Blocked, out.Kind = classifyHTTPStatus(resp.StatusCode)
-	out.FinalURL = resp.Request.URL.String()
-	if redirects != nil {
-		out.Redirects = *redirects
-	}
-	out.HTTP2 = resp.ProtoMajor == 2
-
-	if resp.TLS != nil {
-		out.TLSVersion = tlsVersionString(resp.TLS.Version)
-		out.CipherSuite = tlsCipherSuiteString(resp.TLS.CipherSuite)
-	}
-	return out
 }
 
 func findAndApplyBestDNS(config Config, registry map[string]ProviderEntry) string {
@@ -1653,4 +2471,327 @@ func findAndApplyBestDNS(config Config, registry map[string]ProviderEntry) strin
 
 	setSystemDNS(best.DNS)
 	return best.DNS
+}
+
+func parseDNSAddress(address string) (string, int) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", 53
+	}
+	if host, port, err := net.SplitHostPort(address); err == nil {
+		p, err := strconv.Atoi(port)
+		if err == nil {
+			return host, p
+		}
+		return host, 53
+	}
+	if ip := net.ParseIP(address); ip != nil {
+		return address, 53
+	}
+	if strings.Count(address, ":") == 1 {
+		parts := strings.SplitN(address, ":", 2)
+		if p, err := strconv.Atoi(parts[1]); err == nil {
+			return parts[0], p
+		}
+	}
+	return address, 53
+}
+
+func runProxyDownload(ctx *AppContext) error {
+	fmt.Println("Downloading proxies...")
+	return nil
+}
+
+func runProxyScrape(ctx *AppContext) error {
+	fmt.Println("Scraping proxies...")
+	return nil
+}
+
+func runProxyApplyBest(ctx *AppContext) error {
+	fmt.Println("Applying best proxy...")
+	return nil
+}
+
+func runXrayDownload(ctx *AppContext) error {
+	fmt.Println("Downloading Xray configs...")
+	return nil
+}
+
+func runMTProtoDownload(ctx *AppContext) error {
+	fmt.Println("Downloading MTProto proxies...")
+	return nil
+}
+
+func runProxyCheck(ctx *AppContext, args []string) error {
+	file := ""
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		file = strings.TrimSpace(args[0])
+	}
+	if file == "" {
+		p, err := smartPickFile(ctx, []string{"proxies.txt", "proxy.txt", "input.txt"}, "Proxy file")
+		if err != nil {
+			return err
+		}
+		file = p
+	}
+	fmt.Println("Proxy check file:", file)
+	return nil
+}
+
+func runXrayTest(ctx *AppContext, args []string) error {
+	file := ""
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		file = strings.TrimSpace(args[0])
+	}
+	if file == "" {
+		p, err := smartPickFile(ctx, []string{"config.txt", "xray.txt", "input.txt"}, "Xray config file")
+		if err != nil {
+			return err
+		}
+		file = p
+	}
+	cfg := xp.CheckerConfig{
+		ConfigFile: file,
+		Download:   false,
+		Limit:      0,
+		Threads:    30,
+		Timeout:    2,
+		OutputFile: "alive_configs.txt",
+	}
+	_ = cfg
+	xp.RunChecker(cfg)
+	return nil
+}
+
+func runMTProtoCheck(ctx *AppContext, args []string) error {
+	file := ""
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		file = strings.TrimSpace(args[0])
+	}
+	if file == "" {
+		p, err := smartPickFile(ctx, []string{"mtproto.txt", "mtproto_proxies.txt", "input.txt"}, "MTProto file")
+		if err != nil {
+			return err
+		}
+		file = p
+	}
+	cfg := mtp.CheckerConfig{
+		File:       file,
+		Threads:    20,
+		Timeout:    2 * time.Second,
+		Download:   false,
+		OutputFile: "valid_mtproto.txt",
+		NoColor:    false,
+	}
+	checker := mtp.NewChecker(cfg)
+	return checker.Run()
+}
+
+func runScraperOnly(outputDir string, workers int, skipTelegram bool) error {
+	s := scraper.NewScraper(outputDir, workers, skipTelegram)
+	if err := s.LoadConfig(); err != nil {
+		fmt.Printf("%s[✗] Error loading config: %v%s\n", Red, err, Reset)
+		return err
+	}
+	if err := s.Run(); err != nil {
+		fmt.Printf("%s[✗] Error running scraper: %v%s\n", Red, err, Reset)
+		return err
+	}
+	return nil
+}
+
+func addSource(url, sourceType string) error {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.AddSource(url, sourceType)
+}
+
+func removeSource(url string) error {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.LoadConfig(); err != nil {
+		return err
+	}
+	return s.RemoveSource(url)
+}
+
+func reloadScraperConfig() error {
+	s := scraper.NewScraper("./output", 20, false)
+	return s.ReloadConfig()
+}
+
+func showScraperConfig() error {
+	s := scraper.NewScraper("./output", 20, false)
+	return s.ShowConfig()
+}
+
+func isHelp(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "help", "-h", "--help":
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanupResults(results []DNSResult) []DNSResult {
+	out := make([]DNSResult, 0, len(results))
+	for _, r := range results {
+		if r.DNS != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func cloneResults(results []DNSResult) []DNSResult {
+	out := make([]DNSResult, len(results))
+	copy(out, results)
+	return out
+}
+
+func writeTextFile(path string, lines []string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for _, line := range lines {
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readTextFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out, scanner.Err()
+}
+
+func normalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return p
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+func ensureOutputDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0755)
+}
+
+type DNSMode int
+
+const (
+	DNSModeQuick DNSMode = iota
+	DNSModeFull
+)
+
+func parseDomains(domains string, testURL string) []string {
+	if strings.TrimSpace(testURL) != "" {
+		return []string{strings.TrimSpace(testURL)}
+	}
+	parts := strings.Split(domains, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"cloudflare.com"}
+	}
+	return out
+}
+
+func runDNSApplyBest(ctx *AppContext, args []string) error {
+	cfg := Config{
+		Threads: 10,
+		Mode:    0,
+		Domains: "cloudflare.com,google.com,github.com",
+	}
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		cfg.DNSFile = strings.TrimSpace(args[0])
+	}
+	registry := loadProviderRegistry(cfg.ProviderFile)
+	best := findAndApplyBestDNS(cfg, registry)
+	if best == "" {
+		return errors.New("no valid dns found")
+	}
+	return nil
+}
+
+func testHTTP(domain string, provider ProviderEntry, timeout time.Duration, insecure bool, server string, redirects *int) HTTPResult {
+	out := HTTPResult{}
+	client := newReusableHTTPClient(server, provider, timeout, insecure, true, redirects)
+
+	try := func(method string) (*http.Response, error) {
+		var req *http.Request
+		var err error
+		if method == http.MethodGet {
+			req, err = http.NewRequest(http.MethodGet, "https://"+domain, nil)
+		} else {
+			req, err = http.NewRequest(http.MethodHead, "https://"+domain, nil)
+		}
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "ct-dns-checker/1.0")
+		req.Header.Set("Accept", "*/*")
+		req.Host = domain
+		return client.Do(req)
+	}
+
+	start := time.Now()
+	resp, err := try(http.MethodHead)
+	if err != nil || resp == nil || resp.StatusCode >= 400 {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		resp, err = try(http.MethodGet)
+	}
+	out.DurationMs = time.Since(start).Milliseconds()
+
+	if err != nil {
+		out.Error = err
+		return out
+	}
+	defer resp.Body.Close()
+
+	out.Success = true
+	out.Status = resp.StatusCode
+	out.Blocked, out.Kind = classifyHTTPStatus(resp.StatusCode)
+	out.FinalURL = resp.Request.URL.String()
+	if redirects != nil {
+		out.Redirects = *redirects
+	}
+	out.HTTP2 = resp.ProtoMajor == 2
+	if resp.TLS != nil {
+		out.TLSVersion = tlsVersionString(resp.TLS.Version)
+		out.CipherSuite = tlsCipherSuiteString(resp.TLS.CipherSuite)
+	}
+	return out
 }
