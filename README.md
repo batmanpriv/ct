@@ -1,6 +1,6 @@
 # CT - Check Test
 
-**Version: 1.3.7**
+**Version: 1.3.8**
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -23,7 +23,7 @@
 
 <img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
 
-## What's New in 1.3.7
+## What's New in 1.3.8
 
 ### 🚨 New: MTProto Proxy Checker (Beta)
 
@@ -56,7 +56,7 @@ ct -mtproto proxies.txt -mtproto-out healthy.txt
 ct -mtproto proxies.txt -mtproto-no-color
 ```
 
-### 🕷️ Proxy Scraper Module (New in 1.3.7!)
+### 🕷️ Proxy Scraper Module (New in 1.3.8!)
 
 - **Multi-Source Scraping** — Scrapes proxies and configs from 50+ public sources
 - **Telegram Channel Support** — Extracts from public Telegram channels (requires VPN/proxy)
@@ -90,19 +90,19 @@ ct -scrape-only -output scraped_configs
 ct -scrape-only -workers 20
 
 # Add custom source
-ct -scrape-add-source https://example.com/configs.txt
+ct -source https://example.com/configs.txt
 
 # Add custom Telegram channel
-ct -scrape-add-source https://t.me/mychannel
+ct -source https://t.me/mychannel telegram
 
 # View current sources
-ct -scrape-show-config
+ct -show-config
 
 # Reload default sources (reset config)
-ct -scrape-reload-config
+ct -reload
 
 # Remove a source
-ct -scrape-remove-source https://example.com/old-list.txt
+ct -remove-url https://example.com/old-list.txt
 ```
 
 #### Output Files
@@ -268,7 +268,7 @@ This file contains:
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/ct@1.3.7
+go install github.com/batmanpriv/ct@1.3.8
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
@@ -451,19 +451,18 @@ ct -xray-file configs.txt -xray-url https://google.com
 | `-xray-output` | Output file for alive configs | `alive_configs.txt` |
 | `-xray-url` | Custom HTTP test URL | `https://google.com` |
 
-### Scraper Module Flags (New in 1.3.7!)
+### Scraper Module Flags (New in 1.3.8!)
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-scrape` | Scrape all sources | `false` |
-| `-scrape-only` | Scrape only Telegram channels | `false` |
+| `-scrape-only` | Scrape all sources | `false` |
 | `-skip-telegram` | Skip Telegram scraping | `false` |
 | `-output` | Output directory for scraped configs | `output` |
 | `-workers` | Number of concurrent workers | `10` |
-| `-scrape-add-source` | Add new scraping source URL | `-` |
-| `-scrape-show-config` | Show current sources config | `false` |
-| `-scrape-reload-config` | Reload/reset config to defaults | `false` |
-| `-scrape-remove-source` | Remove a source from config | `-` |
+| `-source` | Add new scraping source URL | `-` |
+| `-show-config` | Show current sources config | `false` |
+| `-reload` | Reload/reset config to defaults | `false` |
+| `-remove-url` | Remove a source from config | `-` |
 
 ***
 
@@ -771,7 +770,7 @@ ct/
 
 ## Changelog
 
-### 1.3.7 (2026)
+### 1.3.8 (2026)
 - **NEW:** MTProto proxy checker module (beta/experimental)
 - Multi-format MTProto parsing (t.me/proxy, tg://proxy, raw)
 - TCP health check with latency measurement
