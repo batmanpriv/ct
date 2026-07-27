@@ -19,9 +19,25 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/batmanpriv/ct/mtp"
 	"github.com/batmanpriv/ct/pc"
+	"github.com/batmanpriv/ct/scraper"
 	"github.com/batmanpriv/ct/xp"
 	"github.com/miekg/dns"
+)
+
+const (
+	Reset   = "\033[0m"
+	Red     = "\033[31m"
+	Green   = "\033[32m"
+	Yellow  = "\033[33m"
+	Blue    = "\033[34m"
+	Magenta = "\033[35m"
+	Cyan    = "\033[36m"
+	Gray    = "\033[37m"
+	White   = "\033[97m"
+	Bold    = "\033[1m"
 )
 
 type DNSResult struct {
@@ -79,6 +95,80 @@ type UIState struct {
 
 var uiState = &UIState{}
 
+type GeoInfo struct {
+	Country  string
+	Provider string
+}
+
+var geoCache sync.Map
+
+type HTTPResult struct {
+	success     bool
+	status      int
+	tlsVersion  string
+	cipherSuite string
+	http2       bool
+}
+
+func runScraperOnly(outputDir string, workers int, skipTelegram bool) {
+	s := scraper.NewScraper(outputDir, workers, skipTelegram)
+
+	if err := s.LoadConfig(); err != nil {
+		fmt.Printf("%s[✗] Error loading config: %v%s\n", Red, err, Reset)
+		return
+	}
+
+	if err := s.Run(); err != nil {
+		fmt.Printf("%s[✗] Error running scraper: %v%s\n", Red, err, Reset)
+		return
+	}
+}
+
+func addSource(url, sourceType string) {
+	s := scraper.NewScraper("./output", 20, false)
+
+	if err := s.LoadConfig(); err != nil {
+		fmt.Printf("%s[✗] Error loading config: %v%s\n", Red, err, Reset)
+		return
+	}
+
+	fmt.Printf("%s[ℹ] Adding source: %s%s\n", Blue, url, Reset)
+
+	if err := s.AddSource(url, sourceType); err != nil {
+		fmt.Printf("%s[✗] Error adding source: %v%s\n", Red, err, Reset)
+		return
+	}
+
+	fmt.Printf("%s[✓] Source added successfully!%s\n", Green, Reset)
+	fmt.Printf("%s[ℹ] Run without flags to scrape all sources%s\n", Blue, Reset)
+}
+
+func showScraperConfig() {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.ShowConfig(); err != nil {
+		fmt.Printf("%s[✗] Error showing config: %v%s\n", Red, err, Reset)
+		os.Exit(1)
+	}
+}
+
+func removeSource(url string) {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.RemoveSource(url); err != nil {
+		fmt.Printf("%s[✗] Error removing source: %v%s\n", Red, err, Reset)
+		os.Exit(1)
+	}
+	fmt.Printf("%s[✓] Source removed successfully: %s%s\n", Green, url, Reset)
+}
+
+func reloadScraperConfig() {
+	s := scraper.NewScraper("./output", 20, false)
+	if err := s.ReloadConfig(); err != nil {
+		fmt.Printf("%s[✗] Error reloading config: %v%s\n", Red, err, Reset)
+		os.Exit(1)
+	}
+	fmt.Printf("%s[✓] Config reloaded successfully%s\n", Green, Reset)
+}
+
 func main() {
 	config := parseFlags()
 
@@ -94,7 +184,7 @@ func main() {
 	if config.ApplyBest {
 		best := findAndApplyBestDNS(config)
 		if best != "" {
-			fmt.Printf("\n✓ Best DNS (%s) applied to system\n", best)
+			fmt.Printf("\n%s✓ Best DNS (%s) applied to system%s\n", Green, best, Reset)
 		}
 		return
 	}
@@ -190,117 +280,6 @@ func main() {
 	printRecommendation(uiState.results, config)
 }
 
-func uiLoop(config Config) {
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		<-ticker.C
-		uiState.mu.Lock()
-		if uiState.shouldQuit {
-			uiState.mu.Unlock()
-			return
-		}
-		results := make([]DNSResult, len(uiState.results))
-		copy(results, uiState.results)
-		completed := atomic.LoadInt32(&uiState.completed)
-		uiState.mu.Unlock()
-
-		fmt.Print("\033[H\033[2J")
-		fmt.Printf("DNS Benchmark - Testing %d servers\n\n", uiState.total)
-
-		progress := float64(completed) / float64(uiState.total) * 100
-		fmt.Printf("Progress: %.1f%% (%d/%d) | Valid: %d\n\n",
-			progress, completed, uiState.total, len(results))
-
-		if len(results) > 0 {
-			sortResults(results, config)
-			printTable(results, config)
-		} else {
-			fmt.Println("Waiting for results...")
-		}
-	}
-}
-
-func sortResults(results []DNSResult, config Config) {
-	sort.Slice(results, func(i, j int) bool {
-		if config.Score && config.Mode >= 1 {
-			if results[i].Score != results[j].Score {
-				return results[i].Score > results[j].Score
-			}
-			return results[i].LookupMs < results[j].LookupMs
-		}
-		return results[i].LookupMs < results[j].LookupMs
-	})
-}
-
-func printTable(results []DNSResult, config Config) {
-	green := "\033[32m"
-	yellow := "\033[33m"
-	red := "\033[31m"
-	reset := "\033[0m"
-
-	if config.NoColor {
-		green = ""
-		yellow = ""
-		red = ""
-		reset = ""
-	}
-
-	fmt.Printf("%-4s %-16s %-10s %-12s %-10s %-20s %-6s\n",
-		"#", "DNS", "Lookup", "HTTPS", "Location", "Provider", "Score")
-	fmt.Println(strings.Repeat("-", 85))
-
-	for i, result := range results {
-		if i >= 20 {
-			break
-		}
-
-		lookupStr := fmt.Sprintf("%dms", result.LookupMs)
-		httpsStr := "-"
-		if config.Mode >= 1 {
-			if result.HTTPS {
-				httpsStr = fmt.Sprintf("%dms", result.HTTPSMs)
-			} else {
-				httpsStr = "FAIL"
-			}
-		}
-
-		location := result.Country
-		if location == "" {
-			location = "Unknown"
-		}
-
-		provider := result.Provider
-		if len(provider) > 18 {
-			provider = provider[:18] + ".."
-		}
-		if provider == "" {
-			provider = "-"
-		}
-
-		scoreStr := "-"
-		if config.Mode >= 1 {
-			scoreStr = fmt.Sprintf("%d", result.Score)
-		}
-
-		color := green
-		if config.Mode >= 1 {
-			if result.Score >= 70 {
-				color = green
-			} else if result.Score >= 50 {
-				color = yellow
-			} else {
-				color = red
-			}
-		}
-
-		rank := fmt.Sprintf("#%d", i+1)
-		fmt.Printf("%s%-4s %-16s %-10s %-12s %-10s %-20s %-6s%s\n",
-			color, rank, result.DNS, lookupStr, httpsStr, location, provider, scoreStr, reset)
-	}
-}
-
 func parseFlags() Config {
 	config := Config{}
 	testURL := ""
@@ -331,12 +310,28 @@ func parseFlags() Config {
 	xrayFile := flag.String("xray-file", "", "Xray config file path")
 	xrayDownload := flag.Bool("xray-dl", false, "Download xray configs")
 	xrayLimit := flag.Int("xray-limit", 0, "Limit number of xray configs")
-	xrayThreads := flag.Int("xray-threads", 10, "Xray test threads")
-	xrayTimeout := flag.Float64("xray-timeout", 0.5, "Xray test timeout in seconds")
+	xrayThreads := flag.Int("xray-threads", 30, "Xray test threads")
+	xrayTimeout := flag.Float64("xray-timeout", 2, "Xray test timeout in seconds")
 	xrayAddSource := flag.String("xray-add-source", "", "Add new xray source URL")
 	xrayTestURL := flag.String("xray-url", "", "Test URL for xray HTTP check")
 	xrayOutput := flag.String("xray-output", "alive_configs.txt", "Output file for alive xray configs")
 
+	mtprotoFile := flag.String("mtproto", "", "MTProto proxy file path")
+	mtprotoDownload := flag.Bool("mtproto-dl", false, "Download MTProto proxies from GitHub")
+	mtprotoThreads := flag.Int("mtproto-t", 20, "Number of threads for MTProto checking")
+	mtprotoTimeout := flag.Int("mtproto-timeout", 2, "Timeout in seconds for MTProto checking")
+	mtprotoOutput := flag.String("mtproto-out", "valid_mtproto.txt", "Output file for healthy MTProto proxies")
+	mtprotoNoColor := flag.Bool("mtproto-no-color", false, "Disable colored output for MTProto")
+
+	sourceURL := flag.String("source", "", "Add source URL with auto-detection (e.g., -source https://example.com/proxies.txt)")
+	sourceType := flag.String("source-type", "", "Force source type (vless, vmess, trojan, ss, mtproto, http, https, socks4, socks5)")
+	scrapeOnly := flag.Bool("scrape-only", false, "Run only scraper and exit")
+	outputDir := flag.String("output", "./output", "Output directory for scraped data")
+	workers := flag.Int("workers", 20, "Number of concurrent workers for scraping")
+	skipTelegram := flag.Bool("skip-telegram", false, "Skip Telegram scraping")
+	removeURL := flag.String("remove-url", "", "Remove a URL from config")
+	reloadConfig := flag.Bool("reload", false, "Reload config (delete old config and load fresh)")
+	showConfig := flag.Bool("show-config", false, "Show saved config file path and contents")
 	flag.Parse()
 
 	config.TestURL = testURL
@@ -354,9 +349,49 @@ func parseFlags() Config {
 			OutputFile: *xrayOutput,
 		}
 		xp.RunChecker(xrayConfig)
-		if *xrayFile != "" || *xrayDownload || *xrayAddSource != "" {
-			os.Exit(0)
+		os.Exit(0)
+	}
+
+	if *mtprotoFile != "" || *mtprotoDownload {
+		mtpConfig := mtp.CheckerConfig{
+			File:       *mtprotoFile,
+			Threads:    *mtprotoThreads,
+			Timeout:    time.Duration(*mtprotoTimeout) * time.Second,
+			Download:   *mtprotoDownload,
+			OutputFile: *mtprotoOutput,
+			NoColor:    *mtprotoNoColor,
 		}
+		checker := mtp.NewChecker(mtpConfig)
+		if err := checker.Run(); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if *scrapeOnly {
+		runScraperOnly(*outputDir, *workers, *skipTelegram)
+		os.Exit(0)
+	}
+
+	if *sourceURL != "" {
+		addSource(*sourceURL, *sourceType)
+		os.Exit(0)
+	}
+
+	if *removeURL != "" {
+		removeSource(*removeURL)
+		os.Exit(0)
+	}
+
+	if *reloadConfig {
+		reloadScraperConfig()
+		os.Exit(0)
+	}
+
+	if *showConfig {
+		showScraperConfig()
+		os.Exit(0)
 	}
 
 	if *proxyFile != "" || *proxyDownload || *proxyScrape || *proxyApplyBest || *proxySet != "" {
@@ -377,10 +412,7 @@ func parseFlags() Config {
 		}
 
 		pc.RunProxyChecker(pcConfig)
-
-		if *proxyFile != "" || *proxyDownload || *proxyScrape || *proxyApplyBest {
-			os.Exit(0)
-		}
+		os.Exit(0)
 	}
 
 	return config
@@ -406,7 +438,7 @@ func findAndApplyBestDNS(config Config) string {
 		}
 	}
 
-	fmt.Printf("Finding best DNS among %d servers...\n\n", len(dnsList))
+	fmt.Printf("%sFinding best DNS among %d servers...%s\n\n", Cyan, len(dnsList), Reset)
 
 	var results []DNSResult
 	var wg sync.WaitGroup
@@ -448,7 +480,7 @@ func findAndApplyBestDNS(config Config) string {
 
 	best := results[0]
 
-	fmt.Printf("Best DNS: %s\n", best.DNS)
+	fmt.Printf("%sBest DNS: %s%s\n", Green, best.DNS, Reset)
 	fmt.Printf("  Lookup: %dms\n", best.LookupMs)
 	if best.HTTPS {
 		fmt.Printf("  HTTPS: %dms\n", best.HTTPSMs)
@@ -482,16 +514,16 @@ func printRecommendation(results []DNSResult, config Config) {
 		secondary = sorted[1]
 	}
 
-	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
-	fmt.Printf("%s      RECOMMENDED DNS CONFIGURATION%s\n", "\033[33m", "\033[0m")
-	fmt.Printf("%s========================================%s\n", "\033[32m", "\033[0m")
+	fmt.Printf("\n%s========================================%s\n", Green, Reset)
+	fmt.Printf("%s      RECOMMENDED DNS CONFIGURATION%s\n", Yellow, Reset)
+	fmt.Printf("%s========================================%s\n", Green, Reset)
 
-	fmt.Printf("\nPrimary:   %s\n", best.DNS)
+	fmt.Printf("\n%sPrimary:%s   %s\n", White, Reset, best.DNS)
 	if secondary.DNS != "" {
-		fmt.Printf("Secondary: %s\n", secondary.DNS)
+		fmt.Printf("%sSecondary:%s %s\n", White, Reset, secondary.DNS)
 	}
 
-	fmt.Printf("\nReason:\n")
+	fmt.Printf("\n%sReason:%s\n", White, Reset)
 	fmt.Printf("  • Latency: %dms (Excellent)\n", best.LookupMs)
 	if best.HTTPS {
 		fmt.Printf("  • HTTPS: %dms\n", best.HTTPSMs)
@@ -501,20 +533,20 @@ func printRecommendation(results []DNSResult, config Config) {
 	fmt.Printf("  • IPv6: %v\n", best.IPv6)
 	fmt.Printf("  • Score: %d/100\n", best.Score)
 
-	fmt.Printf("\nTo apply this DNS automatically:\n")
+	fmt.Printf("\n%sTo apply this DNS automatically:%s\n", White, Reset)
 	fmt.Printf("  ct.exe -apply-best\n")
 
-	fmt.Printf("%s========================================%s\n", "\033[32m", "\033[0m")
+	fmt.Printf("%s========================================%s\n", Green, Reset)
 }
 
 func setSystemDNS(dns string) {
-	fmt.Printf("\nSetting system DNS to: %s\n", dns)
+	fmt.Printf("\n%sSetting system DNS to: %s%s\n", Cyan, dns, Reset)
 	fmt.Println(strings.Repeat("-", 40))
 
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("net", "session")
 		if err := cmd.Run(); err != nil {
-			fmt.Println("⚠️ You need to run as Administrator!")
+			fmt.Printf("%s⚠️ You need to run as Administrator!%s\n", Yellow, Reset)
 			return
 		}
 	}
@@ -572,14 +604,14 @@ func setWindowsDNS(dns string) {
 		return
 	}
 
-	fmt.Printf("✓ DNS set to %s (Interface: %s)\n", dns, iface)
+	fmt.Printf("%s✓ DNS set to %s (Interface: %s)%s\n", Green, dns, iface, Reset)
 	exec.Command("ipconfig", "/flushdns").Run()
 }
 
 func setLinuxDNS(dns string) {
 	cmd := exec.Command("systemd-resolve", "--set-dns="+dns, "--interface=eth0")
 	if err := cmd.Run(); err == nil {
-		fmt.Printf("✓ DNS set to %s using systemd-resolved\n", dns)
+		fmt.Printf("%s✓ DNS set to %s using systemd-resolved%s\n", Green, dns, Reset)
 		return
 	}
 
@@ -589,7 +621,7 @@ func setLinuxDNS(dns string) {
 		fmt.Println("Error setting DNS. Try running with sudo:", err)
 		return
 	}
-	fmt.Printf("✓ DNS set to %s in /etc/resolv.conf\n", dns)
+	fmt.Printf("%s✓ DNS set to %s in /etc/resolv.conf%s\n", Green, dns, Reset)
 }
 
 func setMacDNS(dns string) {
@@ -620,11 +652,11 @@ func setMacDNS(dns string) {
 		fmt.Println("Error setting DNS:", err)
 		return
 	}
-	fmt.Printf("✓ DNS set to %s (Service: %s)\n", dns, service)
+	fmt.Printf("%s✓ DNS set to %s (Service: %s)%s\n", Green, dns, service, Reset)
 }
 
 func checkDNSStatus() {
-	fmt.Println("\nCurrent DNS Settings:")
+	fmt.Printf("\n%sCurrent DNS Settings:%s\n", Cyan, Reset)
 	fmt.Println(strings.Repeat("-", 40))
 
 	switch runtime.GOOS {
@@ -995,21 +1027,6 @@ func getGeoIP(ip string) (string, string) {
 	return country, provider
 }
 
-type GeoInfo struct {
-	Country  string
-	Provider string
-}
-
-var geoCache sync.Map
-
-type HTTPResult struct {
-	success     bool
-	status      int
-	tlsVersion  string
-	cipherSuite string
-	http2       bool
-}
-
 func testHTTP(ip, domain string) HTTPResult {
 	result := HTTPResult{success: false}
 
@@ -1167,7 +1184,7 @@ func saveJSON(results []DNSResult) {
 
 func printSummary(results []DNSResult, config Config) {
 	if len(results) == 0 {
-		fmt.Println("\nNo valid DNS servers found")
+		fmt.Printf("\n%sNo valid DNS servers found%s\n", Red, Reset)
 		return
 	}
 
@@ -1194,7 +1211,7 @@ func printSummary(results []DNSResult, config Config) {
 		avgScore = totalScore / int64(len(results))
 	}
 
-	fmt.Printf("\n%s========================================%s\n", "\033[32m", "\033[0m")
+	fmt.Printf("\n%s========================================%s\n", Green, Reset)
 	fmt.Println("Git&Tg: github.com/batmanpriv")
 	fmt.Printf("Total DNS Tested: %d\n", len(results))
 	fmt.Printf("Valid DNS (Lookup OK): %d\n", totalLookup)
@@ -1211,4 +1228,115 @@ func printSummary(results []DNSResult, config Config) {
 		}
 	}
 	fmt.Printf("========================================\n")
+}
+
+func uiLoop(config Config) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		uiState.mu.Lock()
+		if uiState.shouldQuit {
+			uiState.mu.Unlock()
+			return
+		}
+		results := make([]DNSResult, len(uiState.results))
+		copy(results, uiState.results)
+		completed := atomic.LoadInt32(&uiState.completed)
+		uiState.mu.Unlock()
+
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("DNS Benchmark - Testing %d servers\n\n", uiState.total)
+
+		progress := float64(completed) / float64(uiState.total) * 100
+		fmt.Printf("Progress: %.1f%% (%d/%d) | Valid: %d\n\n",
+			progress, completed, uiState.total, len(results))
+
+		if len(results) > 0 {
+			sortResults(results, config)
+			printTable(results, config)
+		} else {
+			fmt.Println("Waiting for results...")
+		}
+	}
+}
+
+func sortResults(results []DNSResult, config Config) {
+	sort.Slice(results, func(i, j int) bool {
+		if config.Score && config.Mode >= 1 {
+			if results[i].Score != results[j].Score {
+				return results[i].Score > results[j].Score
+			}
+			return results[i].LookupMs < results[j].LookupMs
+		}
+		return results[i].LookupMs < results[j].LookupMs
+	})
+}
+
+func printTable(results []DNSResult, config Config) {
+	green := Green
+	yellow := Yellow
+	red := Red
+	reset := Reset
+
+	if config.NoColor {
+		green = ""
+		yellow = ""
+		red = ""
+		reset = ""
+	}
+
+	fmt.Printf("%-4s %-16s %-10s %-12s %-10s %-20s %-6s\n",
+		"#", "DNS", "Lookup", "HTTPS", "Location", "Provider", "Score")
+	fmt.Println(strings.Repeat("-", 85))
+
+	for i, result := range results {
+		if i >= 20 {
+			break
+		}
+
+		lookupStr := fmt.Sprintf("%dms", result.LookupMs)
+		httpsStr := "-"
+		if config.Mode >= 1 {
+			if result.HTTPS {
+				httpsStr = fmt.Sprintf("%dms", result.HTTPSMs)
+			} else {
+				httpsStr = "FAIL"
+			}
+		}
+
+		location := result.Country
+		if location == "" {
+			location = "Unknown"
+		}
+
+		provider := result.Provider
+		if len(provider) > 18 {
+			provider = provider[:18] + ".."
+		}
+		if provider == "" {
+			provider = "-"
+		}
+
+		scoreStr := "-"
+		if config.Mode >= 1 {
+			scoreStr = fmt.Sprintf("%d", result.Score)
+		}
+
+		color := green
+		if config.Mode >= 1 {
+			if result.Score >= 70 {
+				color = green
+			} else if result.Score >= 50 {
+				color = yellow
+			} else {
+				color = red
+			}
+		}
+
+		rank := fmt.Sprintf("#%d", i+1)
+		fmt.Printf("%s%-4s %-16s %-10s %-12s %-10s %-20s %-6s%s\n",
+			color, rank, result.DNS, lookupStr, httpsStr, location, provider, scoreStr, reset)
+	}
 }
