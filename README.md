@@ -268,7 +268,7 @@ This file contains:
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/ct@1.3.8
+go install github.com/batmanpriv/ct@1.3.9
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
