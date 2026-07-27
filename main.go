@@ -495,7 +495,7 @@ func showCursor() {
 func renderBanner() {
 	clearScreen()
 	fmt.Println(Bold + Magenta + "╔════════════════════════════════════╗" + Reset)
-	fmt.Println(Bold + Magenta + "║            Cehck test | CT         ║" + Reset)
+	fmt.Println(Bold + Magenta + "║            Check test | CT         ║" + Reset)
 	fmt.Println(Bold + Magenta + "╚════════════════════════════════════╝" + Reset)
 	fmt.Println()
 	fmt.Println(Cyan + "GitHub   : https://github.com/batmanpriv" + Reset)
