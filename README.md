@@ -1,6 +1,6 @@
 # CT - Check Test
 
-**Version: 1.3.8**
+**Version: 1.3.9**
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
