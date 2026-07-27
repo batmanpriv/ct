@@ -1,5 +1,3 @@
-***
-
 # CT - Check Test
 
 **Version: 1.3.7**
