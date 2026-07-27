@@ -21,7 +21,7 @@
 
 # ScreenShot
 
-<img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
+<img src="https://github.com/user-attachments/assets/0413df28-3e25-4d35-b03b-df09fbcede0c">
 
 ## What's New in 1.3.8
 
