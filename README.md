@@ -1,6 +1,8 @@
+***
+
 # CT - Check Test
 
-**Version: 1.2.7**
+**Version: 1.3.7**
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,22 +10,162 @@
 
 ## Overview
 
-**CT** is a powerful, multi-purpose network diagnostic and optimization tool written in Go. It combines a high-performance DNS benchmark, a feature-rich proxy checker, and a comprehensive Xray/V2Ray config tester—all in a single executable.
+**CT** is a powerful, multi-purpose network diagnostic and optimization tool written in Go. It combines a high-performance DNS benchmark, a feature-rich proxy checker, an MTProto proxy tester, and a comprehensive Xray/V2Ray config tester—all in a single executable.
 
 ### Why CT?
 
-- **All-in-One Solution** — DNS benchmarking, proxy checking, and Xray config testing
+- **All-in-One Solution** — DNS benchmarking, proxy checking, MTProto testing, and Xray config testing
 - **Production-Ready** — Battle-tested with thousands of DNS servers, proxies, and configs
 - **Cross-Platform** — Windows, Linux, and macOS support with native system integration
 - **Performance-First** — Concurrent architecture maximizes throughput while minimizing resource usage
 
----
+***
 
 # ScreenShot
 
 <img src="https://github.com/user-attachments/assets/816beda5-bbd9-451b-90a8-2c4e8fca6b3a">
 
-## What's New in 1.2.7
+## What's New in 1.3.7
+
+### 🚨 New: MTProto Proxy Checker (Beta)
+
+> ⚠️ **Note:** This module is experimental and may not be 100% reliable. Use with caution.
+
+- **MTProto Protocol Support** — Test Telegram MTProto proxies
+- **Multiple Input Formats** — Supports `t.me/proxy`, `tg://proxy`, and raw formats
+- **Real-time Health Check** — Validates proxies with actual TCP connection
+- **Latency Measurement** — Reports response time for each proxy
+- **Auto-Download** — Fetches proxies from public MTProto sources
+- **File Output** — Saves healthy proxies to `valid_mtproto.txt`
+- **Concurrent Testing** — Multi-threaded testing for speed
+
+### 🛠️ MTProto Usage
+
+```bash
+# Test MTProto proxies from a file
+ct -mtproto proxies.txt
+
+# Download and test from public sources
+ct -mtproto-dl
+
+# Custom threads and timeout
+ct -mtproto proxies.txt -mtproto-t 20 -mtproto-timeout 2
+
+# Custom output file
+ct -mtproto proxies.txt -mtproto-out healthy.txt
+
+# Disable colored output
+ct -mtproto proxies.txt -mtproto-no-color
+```
+
+### 🕷️ Proxy Scraper Module (New in 1.3.7!)
+
+- **Multi-Source Scraping** — Scrapes proxies and configs from 50+ public sources
+- **Telegram Channel Support** — Extracts from public Telegram channels (requires VPN/proxy)
+- **Protocol Detection** — Auto-detects VLESS, VMESS, Trojan, SS, MTProto, HTTP/SOCKS
+- **Config Extraction** — Parses and extracts proxy configs from raw text
+- **Concurrent Scraping** — Multi-threaded scraping for maximum speed
+- **Deduplication** — Automatically removes duplicate entries
+- **Country-Based Output** — Saves configs to separate files by protocol type
+- **Custom Source Management** — Add your own scraping sources
+
+#### Supported Sources
+
+- **Config Lists** — GitHub, GitLab, Pastebin, raw URLs (20+ pre-configured)
+- **MTProto Lists** — Public MTProto proxy lists
+- **Proxy Lists** — HTTP, HTTPS, SOCKS4, SOCKS5 from multiple sources
+- **Telegram Channels** — Public proxy/config channels (requires VPN)
+
+#### Scraper Usage
+
+```bash
+# Scrape all sources (default)
+ct -scrape-only
+
+# Skip Telegram scraping
+ct -scrape-only -skip-telegram
+
+# Custom output directory
+ct -scrape-only -output scraped_configs
+
+# Custom worker threads
+ct -scrape-only -workers 20
+
+# Add custom source
+ct -scrape-add-source https://example.com/configs.txt
+
+# Add custom Telegram channel
+ct -scrape-add-source https://t.me/mychannel
+
+# View current sources
+ct -scrape-show-config
+
+# Reload default sources (reset config)
+ct -scrape-reload-config
+
+# Remove a source
+ct -scrape-remove-source https://example.com/old-list.txt
+```
+
+#### Output Files
+
+After scraping, configs are saved to the `output/` directory:
+
+```
+output/
+├── vless.txt      # VLESS configs
+├── vmess.txt      # VMESS configs
+├── trojan.txt     # Trojan configs
+├── ss.txt         # ShadowSocks configs
+├── mtproto.txt    # MTProto proxies (tg:// links)
+├── http.txt       # HTTP proxies
+├── https.txt      # HTTPS proxies
+├── socks4.txt     # SOCKS4 proxies
+└── socks5.txt     # SOCKS5 proxies
+```
+
+#### Example Output
+
+```
+╔════════════════════════════════════════╗
+║     Proxy Scraper - Starting...      ║
+╚════════════════════════════════════════╝
+
+[ℹ] Workers: 10
+[ℹ] Config URLs: 25
+[ℹ] MTProto URLs: 10
+[ℹ] Proxy Types: 5
+[ℹ] Telegram Channels: 7
+[ℹ] Custom Sources: 3
+
+[Worker 1] Scraping config: https://raw.githubusercontent.com/...
+[Worker 2] Scraping mtproto: https://raw.githubusercontent.com/...
+[Worker 3] Scraping telegram: https://t.me/ProxyMTProto
+[Worker 1] [✓] Success: https://raw.githubusercontent.com/... (vless:45 vmess:23 trojan:12 ss:8 mtproto:0 proxy:15)
+[Worker 3] [✓] Success: https://t.me/ProxyMTProto (vless:12 vmess:8 trojan:5 ss:3 mtproto:25 proxy:0)
+[Progress] 15/47 (31.9%)
+
+[✓] Saved 234 items to output/vless.txt
+[✓] Saved 156 items to output/vmess.txt
+[✓] Saved 89 items to output/trojan.txt
+[✓] Saved 67 items to output/ss.txt
+[✓] Saved 145 items to output/mtproto.txt
+[✓] Saved 78 items to output/http.txt
+[✓] Saved 92 items to output/socks5.txt
+```
+
+#### Scraper Configuration
+
+The scraper uses a `sources.json` config file stored in:
+- **Windows:** `C:\Users\<username>\.proxy-scraper\sources.json`
+- **Linux/macOS:** `~/.proxy-scraper/sources.json`
+
+This file contains:
+- Config URLs (VLESS, VMESS, Trojan, SS)
+- MTProto URLs
+- Proxy list URLs (HTTP, HTTPS, SOCKS)
+- Telegram channel URLs
+- Custom sources
 
 ### 🚀 Xray Config Checker Improvements
 
@@ -65,7 +207,7 @@
 - Fixed temporary config cleanup
 - Improved concurrent testing stability
 
----
+***
 
 ## Features
 
@@ -89,10 +231,22 @@
 - **Proxy Scraping** — Download or scrape proxies from various sources
 - **IPv6 Support** — Full IPv6 proxy detection and testing
 
-### 🛸 Xray Config Checker Module (New!)
+### 🔶 MTProto Proxy Checker (Beta)
+
+- **Telegram Proxy Support** — Test MTProto proxies for Telegram
+- **Multiple Formats** — `t.me/proxy`, `tg://proxy`, key=value, and raw formats
+- **TCP Health Check** — Validates connection with actual TCP handshake
+- **Secret Decoding** — Handles hex-encoded secrets (0x, dd/ee prefix)
+- **Real-time Results** — Shows OK/BAD status with latency
+- **Auto-Save** — Writes healthy proxies to file in real-time
+- **Multi-Source Download** — Fetches from GitHub public lists
+
+> ⚠️ **Experimental:** This module is under active development and may not work reliably in all cases.
+
+### 🛸 Xray Config Checker Module
 
 - **Protocol Support** — VLESS, VMESS, Trojan, ShadowSocks
-- **Transport Types** — TCP, WS (WebSocket), gRPC
+- **Transport Types** — TCP, WS (WebSocket), gRPC, XHTTP, HTTPUpgrade
 - **Security Types** — TLS, Reality, None
 - **Config Sources** — 20+ public config sources pre-configured
 - **Automatic Binary** — Downloads Xray core binary on first run
@@ -109,14 +263,14 @@
 - **Cross-Platform System Settings** — Native support for Windows, Linux, macOS
 - **Status Reporting** — View current system DNS and proxy settings
 
----
+***
 
 ## Installation
 
 ### Using Go Install (Recommended)
 
 ```bash
-go install github.com/batmanpriv/ct@1.2.7
+go install github.com/batmanpriv/ct@1.3.7
 ```
 
 This will install the `ct` binary to your `$GOPATH/bin` directory.
@@ -139,7 +293,7 @@ go install
 
 Download the latest release for your platform from the [releases page](https://github.com/batmanpriv/ct/releases).
 
----
+***
 
 ## Quick Start Guide
 
@@ -196,7 +350,26 @@ ct -proxy-apply-best
 ct -proxy-set status
 ```
 
-### Xray Config Testing (New!)
+### MTProto Proxy Testing (Beta)
+
+```bash
+# Test MTProto proxies from a file
+ct -mtproto mtproto.txt
+
+# Download from public sources and test
+ct -mtproto-dl
+
+# Custom threads and timeout
+ct -mtproto mtproto.txt -mtproto-t 20 -mtproto-timeout 2
+
+# Custom output file
+ct -mtproto mtproto.txt -mtproto-out healthy_mtproto.txt
+
+# Disable colored output
+ct -mtproto mtproto.txt -mtproto-no-color
+```
+
+### Xray Config Testing
 
 ```bash
 # Test configs from a file
@@ -217,9 +390,11 @@ ct -xray-add-source https://example.com/configs.txt
 # Output to custom file
 ct -xray-file configs.txt -xray-output alive.txt
 
+# Custom HTTP test URL
+ct -xray-file configs.txt -xray-url https://google.com
 ```
 
----
+***
 
 ## Command Reference
 
@@ -254,7 +429,18 @@ ct -xray-file configs.txt -xray-output alive.txt
 | `-proxy-set` | Set system proxy or check status | `-` |
 | `-proxy-url` | Test URL for proxy checking | `https://telegram.org` |
 
-### Xray Config Module Flags (New!)
+### MTProto Module Flags (Beta)
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-mtproto` | Path to MTProto proxy list file | `-` |
+| `-mtproto-dl` | Download proxies from public sources | `false` |
+| `-mtproto-t` | Number of concurrent threads | `20` |
+| `-mtproto-timeout` | Timeout in seconds for each test | `2` |
+| `-mtproto-out` | Output file for healthy proxies | `valid_mtproto.txt` |
+| `-mtproto-no-color` | Disable colored output | `false` |
+
+### Xray Config Module Flags
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -265,9 +451,23 @@ ct -xray-file configs.txt -xray-output alive.txt
 | `-xray-timeout` | Test timeout in seconds | `0.5` |
 | `-xray-add-source` | Add new config source URL | `-` |
 | `-xray-output` | Output file for alive configs | `alive_configs.txt` |
-| `-xray-url` | Send Request with config to url | `https://google.com` |
+| `-xray-url` | Custom HTTP test URL | `https://google.com` |
 
----
+### Scraper Module Flags (New in 1.3.7!)
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-scrape` | Scrape all sources | `false` |
+| `-scrape-only` | Scrape only Telegram channels | `false` |
+| `-skip-telegram` | Skip Telegram scraping | `false` |
+| `-output` | Output directory for scraped configs | `output` |
+| `-workers` | Number of concurrent workers | `10` |
+| `-scrape-add-source` | Add new scraping source URL | `-` |
+| `-scrape-show-config` | Show current sources config | `false` |
+| `-scrape-reload-config` | Reload/reset config to defaults | `false` |
+| `-scrape-remove-source` | Remove a source from config | `-` |
+
+***
 
 ## Input File Formats
 
@@ -301,6 +501,24 @@ socks4://192.168.1.4:1081
 192.168.1.6:1080
 ```
 
+### MTProto Proxy List
+
+One proxy per line. Supports multiple formats:
+
+```
+# t.me/proxy links
+https://t.me/proxy?server=example.com&port=443&secret=hexsecret
+
+# tg:// links
+tg://proxy?server=example.com&port=443&secret=hexsecret
+
+# Key=value format
+server=example.com port=443 secret=hexsecret
+
+# Raw format
+example.com 443 hexsecret
+```
+
 ### Xray Config List
 
 One config link per line. Supports VLESS, VMESS, Trojan, SS:
@@ -312,7 +530,7 @@ trojan://password@server:port?security=tls&type=ws&sni=domain.com
 ss://method:password@server:port
 ```
 
----
+***
 
 ## Output Examples
 
@@ -339,6 +557,21 @@ Highest Score: 1.1.1.1 (95/100)
 ========================================
 ```
 
+### MTProto Proxy Output
+
+```
+[i] starting download
+[i] sources:
+  - https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt
+  - https://raw.githubusercontent.com/Grim1313/mtproto-for-telegram/master/all_proxies.txt
+[i] checking 250 proxies with 20 threads and 2s timeout
+[OK] 185.143.230.10:443 | 145ms
+[BAD] 104.21.94.161:443 | context deadline exceeded
+[OK] 93.152.205.216:443 | 162ms
+
+OK: 87 | BAD: 163 | TOTAL: 250
+```
+
 ### Xray Config Output
 
 ```
@@ -346,7 +579,7 @@ Downloading configs from online sources...
 Downloaded 245 configs from https://raw.githubusercontent.com/...
 Loaded 245 configs
 Xray binary already exists
-Using xray binary: C:\Users\\.xray-test\xray.exe
+Using xray binary: C:\Users\...\.xray-test\xray.exe
 Threads: 10, Timeout: 0.5s
 
 Testing configs...
@@ -372,7 +605,7 @@ Canada: 3
 Alive configs saved to: alive_configs.txt
 ```
 
----
+***
 
 ## Xray Config Sources
 
@@ -394,7 +627,7 @@ ct -xray-add-source https://example.com/my-configs.txt
 # Sources are saved to sources.json for future use
 ```
 
----
+***
 
 ## Advanced Usage
 
@@ -456,7 +689,7 @@ sudo ct -apply-best
 
 The tool automatically detects your OS and applies the recommended settings.
 
----
+***
 
 ## Performance Optimization
 
@@ -470,6 +703,10 @@ The tool automatically detects your OS and applies the recommended settings.
   - Higher threads significantly speed up testing
   - Recommended: 100-200 for thousands of proxies
 
+- **MTProto Testing:** Use `-mtproto-t` flag (default: 20)
+  - Each test opens a TCP connection
+  - Recommended: 20-50 depending on network
+
 - **Xray Testing:** Use `-xray-threads` flag (default: 10)
   - Each test starts a new Xray instance
   - Recommended: 5-20 depending on system resources
@@ -479,7 +716,7 @@ The tool automatically detects your OS and applies the recommended settings.
 - Results are stored in memory during testing
 - For very large lists, use `-xray-limit` to limit testing
 
----
+***
 
 ## Troubleshooting
 
@@ -504,7 +741,12 @@ The tool automatically detects your OS and applies the recommended settings.
 - Location data is cached to minimize API calls
 - Use `-xray-limit` to reduce testing volume
 
----
+**"MTProto test not working reliably"**
+- This module is experimental (beta)
+- Some proxies may timeout or fail unexpectedly
+- Try increasing `-mtproto-timeout` for better results
+
+***
 
 ## Project Structure
 
@@ -515,8 +757,10 @@ ct/
 ├── go.sum                     # Dependency checksums
 ├── pc/
 │   └── proxy-checker.go       # Proxy checker module
+├── mtp/
+│   └── mtproto-checker.go     # MTProto proxy checker (Beta!)
 ├── xp/
-│   └── xray-checker.go        # Xray config checker module (New!)
+│   └── xray-checker.go        # Xray config checker module
 └── resolvers.txt              # DNS server list
 ```
 
@@ -525,11 +769,16 @@ ct/
 - [`golang.org/x/net/proxy`](https://pkg.go.dev/golang.org/x/net/proxy) — SOCKS proxy support
 - [`github.com/miekg/dns`](https://pkg.go.dev/github.com/miekg/dns) — DNS protocol implementation
 
----
+***
 
 ## Changelog
 
-### 1.2.7 (2024)
+### 1.3.7 (2026)
+- **NEW:** MTProto proxy checker module (beta/experimental)
+- Multi-format MTProto parsing (t.me/proxy, tg://proxy, raw)
+- TCP health check with latency measurement
+- Real-time result output
+- Auto-save healthy proxies to file
 - Added Xray/V2Ray config checker module
 - Multi-protocol support: VLESS, VMESS, Trojan, SS
 - Automatic Xray binary download
@@ -549,7 +798,7 @@ ct/
 - DNS-over-TLS and DNS-over-HTTPS support
 - System DNS configuration
 
----
+***
 
 ### Development Setup
 
@@ -568,29 +817,18 @@ go test ./...
 go build -o ct main.go
 ```
 
----
+***
 
 ## License
 
 MIT License — See [LICENSE](LICENSE) file for details.
-
----
-
-## Acknowledgments
-
-- DNS protocol support by [miekg/dns](https://github.com/miekg/dns)
-- Proxy support by [golang.org/x/net](https://pkg.go.dev/golang.org/x/net)
-- Xray core by [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
-- GeoIP data from [ip-api.com](https://ip-api.com) and [ipinfo.io](https://ipinfo.io)
-- Public config lists from various open-source projects
-
----
 
 ## Support
 
 - **Issues:** [GitHub Issues](https://github.com/batmanpriv/ct/issues)
 - **Discussions:** [GitHub Discussions](https://github.com/batmanpriv/ct/discussions)
 
----
 
 *CT — The Complete Network Testing Tool*
+
+***
