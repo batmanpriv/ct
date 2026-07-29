@@ -1,14 +1,17 @@
 package scraper
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +30,12 @@ const (
 	White     = "\033[97m"
 	Bold      = "\033[1m"
 	BrightRed = "\033[91m"
+)
+
+const (
+	telegramItemsPerType = 10
+	telegramMaxPages     = 25
+	httpFetchRetries     = 2
 )
 
 type SourceConfig struct {
@@ -63,6 +72,7 @@ type Scraper struct {
 	Workers      int
 	SkipTelegram bool
 	mu           sync.Mutex
+	uaCounter    uint64
 }
 
 var (
@@ -143,13 +153,14 @@ var (
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36",
 	}
 
-	vlessRegex   = regexp.MustCompile(`vless://[^\s"'<>]+`)
-	vmessRegex   = regexp.MustCompile(`vmess://[^\s"'<>]+`)
-	trojanRegex  = regexp.MustCompile(`trojan://[^\s"'<>]+`)
-	ssRegex      = regexp.MustCompile(`ss://[^\s"'<>]+`)
-	ssrRegex     = regexp.MustCompile(`ssr://[^\s"'<>]+`)
-	mtprotoRegex = regexp.MustCompile(`(?:https://t\.me/proxy\?|tg://proxy\?|https://\w+\.t\.me/proxy\?)[^\s"'<>]+`)
-	proxyRegex   = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}\b`)
+	vlessRegex    = regexp.MustCompile(`vless://[^\s"'<>]+`)
+	vmessRegex    = regexp.MustCompile(`vmess://[^\s"'<>]+`)
+	trojanRegex   = regexp.MustCompile(`trojan://[^\s"'<>]+`)
+	ssRegex       = regexp.MustCompile(`ss://[^\s"'<>]+`)
+	ssrRegex      = regexp.MustCompile(`ssr://[^\s"'<>]+`)
+	mtprotoRegex  = regexp.MustCompile(`(?:https://t\.me/proxy\?|tg://proxy\?|https://\w+\.t\.me/proxy\?)[^\s"'<>]+`)
+	proxyRegex    = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}\b`)
+	tgPostIDRegex = regexp.MustCompile(`data-post="[^"]+/(\d+)"`)
 )
 
 func NewScraper(outputDir string, workers int, skipTelegram bool) *Scraper {
@@ -161,7 +172,8 @@ func NewScraper(outputDir string, workers int, skipTelegram bool) *Scraper {
 }
 
 func (s *Scraper) getRandomUserAgent() string {
-	return userAgents[time.Now().UnixNano()%int64(len(userAgents))]
+	idx := atomic.AddUint64(&s.uaCounter, 1)
+	return userAgents[idx%uint64(len(userAgents))]
 }
 
 func (s *Scraper) fetchURL(urlStr string) (string, error) {
@@ -197,67 +209,236 @@ func (s *Scraper) fetchURL(urlStr string) (string, error) {
 	return string(body), nil
 }
 
+func (s *Scraper) fetchURLWithRetry(urlStr string, retries int) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		text, err := s.fetchURL(urlStr)
+		if err == nil {
+			return text, nil
+		}
+		lastErr = err
+		time.Sleep(time.Duration(250*(attempt+1)) * time.Millisecond)
+	}
+	return "", lastErr
+}
+
+func decodeBase64Blob(text string) (string, bool) {
+	clean := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(text))
+
+	if len(clean) < 16 {
+		return "", false
+	}
+
+	encodings := []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	}
+
+	for _, enc := range encodings {
+		if decoded, err := enc.DecodeString(clean); err == nil && len(decoded) > 0 {
+			return string(decoded), true
+		}
+	}
+
+	return "", false
+}
+
 func (s *Scraper) extractConfigsFromText(text string) (vless, vmess, trojan, ss, mtproto, proxies []string) {
-	vless = vlessRegex.FindAllString(text, -1)
-	vmess = vmessRegex.FindAllString(text, -1)
-	trojan = trojanRegex.FindAllString(text, -1)
-	ss = ssRegex.FindAllString(text, -1)
-	ss = append(ss, ssrRegex.FindAllString(text, -1)...)
-	mtproto = mtprotoRegex.FindAllString(text, -1)
-	proxies = proxyRegex.FindAllString(text, -1)
+	unescaped := html.UnescapeString(text)
+
+	vless = vlessRegex.FindAllString(unescaped, -1)
+	vmess = vmessRegex.FindAllString(unescaped, -1)
+	trojan = trojanRegex.FindAllString(unescaped, -1)
+	ss = ssRegex.FindAllString(unescaped, -1)
+	ss = append(ss, ssrRegex.FindAllString(unescaped, -1)...)
+	mtproto = mtprotoRegex.FindAllString(unescaped, -1)
+	proxies = proxyRegex.FindAllString(unescaped, -1)
+
+	if len(vless)+len(vmess)+len(trojan)+len(ss)+len(mtproto)+len(proxies) == 0 {
+		if decoded, ok := decodeBase64Blob(unescaped); ok {
+			decodedUnescaped := html.UnescapeString(decoded)
+			vless = append(vless, vlessRegex.FindAllString(decodedUnescaped, -1)...)
+			vmess = append(vmess, vmessRegex.FindAllString(decodedUnescaped, -1)...)
+			trojan = append(trojan, trojanRegex.FindAllString(decodedUnescaped, -1)...)
+			ss = append(ss, ssRegex.FindAllString(decodedUnescaped, -1)...)
+			ss = append(ss, ssrRegex.FindAllString(decodedUnescaped, -1)...)
+			mtproto = append(mtproto, mtprotoRegex.FindAllString(decodedUnescaped, -1)...)
+			proxies = append(proxies, proxyRegex.FindAllString(decodedUnescaped, -1)...)
+		}
+	}
 
 	return
 }
 
-func (s *Scraper) DetectSourceType(url string) string {
-    url = strings.TrimSpace(url)
+func normalizeTelegramChannel(rawURL string) string {
+	u := strings.TrimSpace(rawURL)
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	u = strings.TrimPrefix(u, "www.")
+	u = strings.TrimPrefix(u, "telegram.me/")
+	u = strings.TrimPrefix(u, "t.me/")
+	u = strings.TrimPrefix(u, "s/")
+	u = strings.TrimPrefix(u, "@")
+	u = strings.Trim(u, "/")
 
-    if strings.Contains(url, "t.me/") {
-        return "telegram"
-    }
+	if idx := strings.IndexAny(u, "?/"); idx != -1 {
+		u = u[:idx]
+	}
 
-    text, err := s.fetchURL(url)
-    if err != nil {
-        return "unknown"
-    }
+	return u
+}
 
-    vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
+func (s *Scraper) scrapeTelegramChannel(rawURL string) ([]string, error) {
+	channel := normalizeTelegramChannel(rawURL)
+	if channel == "" {
+		return nil, fmt.Errorf("invalid telegram channel url: %s", rawURL)
+	}
 
-    counts := map[string]int{
-        "vless":   len(vless),
-        "vmess":   len(vmess),
-        "trojan":  len(trojan),
-        "ss":      len(ss),
-        "mtproto": len(mtproto),
-        "proxy":   len(proxies),
-    }
+	counts := map[string]int{
+		"vless": 0, "vmess": 0, "trojan": 0, "ss": 0, "mtproto": 0, "proxy": 0,
+	}
+	seen := make(map[string]bool)
+	collected := []string{}
 
-    maxType := "unknown"
-    maxCount := 0
-    for typ, count := range counts {
-        if count > maxCount {
-            maxCount = count
-            maxType = typ
-        }
-    }
+	before := 0
+	lastBefore := -1
 
-    if maxCount == 0 {
-        return "unknown"
-    }
+	for page := 0; page < telegramMaxPages; page++ {
+		pageURL := fmt.Sprintf("https://t.me/s/%s", channel)
+		if before > 0 {
+			pageURL = fmt.Sprintf("https://t.me/s/%s?before=%d", channel, before)
+		}
 
-    typeMap := map[string]string{
-        "vless":   "vless",
-        "vmess":   "vmess",
-        "trojan":  "trojan",
-        "ss":      "ss",
-        "mtproto": "mtproto",
-        "proxy":   "http",
-    }
+		text, err := s.fetchURLWithRetry(pageURL, httpFetchRetries)
+		if err != nil {
+			if page == 0 {
+				return nil, err
+			}
+			break
+		}
 
-    if mapped, ok := typeMap[maxType]; ok {
-        return mapped
-    }
-    return "unknown"
+		vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
+		groups := []struct {
+			typ   string
+			items []string
+		}{
+			{"vless", vless},
+			{"vmess", vmess},
+			{"trojan", trojan},
+			{"ss", ss},
+			{"mtproto", mtproto},
+			{"proxy", proxies},
+		}
+
+		for _, g := range groups {
+			for _, item := range g.items {
+				if counts[g.typ] >= telegramItemsPerType {
+					break
+				}
+				if seen[item] {
+					continue
+				}
+				seen[item] = true
+				collected = append(collected, item)
+				counts[g.typ]++
+			}
+		}
+
+		allFull := true
+		for _, c := range counts {
+			if c < telegramItemsPerType {
+				allFull = false
+				break
+			}
+		}
+		if allFull {
+			break
+		}
+
+		matches := tgPostIDRegex.FindAllStringSubmatch(text, -1)
+		if len(matches) == 0 {
+			break
+		}
+
+		minID := -1
+		for _, m := range matches {
+			id, err := strconv.Atoi(m[1])
+			if err != nil {
+				continue
+			}
+			if minID == -1 || id < minID {
+				minID = id
+			}
+		}
+
+		if minID <= 0 || minID == lastBefore {
+			break
+		}
+
+		lastBefore = minID
+		before = minID
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	return collected, nil
+}
+
+func (s *Scraper) DetectSourceType(rawURL string) string {
+	u := strings.TrimSpace(rawURL)
+
+	if strings.Contains(u, "t.me/") || strings.Contains(u, "telegram.me/") {
+		return "telegram"
+	}
+
+	text, err := s.fetchURLWithRetry(u, httpFetchRetries)
+	if err != nil {
+		return "unknown"
+	}
+
+	vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
+
+	counts := map[string]int{
+		"vless":   len(vless),
+		"vmess":   len(vmess),
+		"trojan":  len(trojan),
+		"ss":      len(ss),
+		"mtproto": len(mtproto),
+		"proxy":   len(proxies),
+	}
+
+	maxType := "unknown"
+	maxCount := 0
+	for typ, count := range counts {
+		if count > maxCount {
+			maxCount = count
+			maxType = typ
+		}
+	}
+
+	if maxCount == 0 {
+		return "unknown"
+	}
+
+	typeMap := map[string]string{
+		"vless":   "vless",
+		"vmess":   "vmess",
+		"trojan":  "trojan",
+		"ss":      "ss",
+		"mtproto": "mtproto",
+		"proxy":   "http",
+	}
+
+	if mapped, ok := typeMap[maxType]; ok {
+		return mapped
+	}
+	return "unknown"
 }
 
 func (s *Scraper) getConfigPath() (string, error) {
@@ -362,13 +543,13 @@ func (s *Scraper) ShowConfig() error {
 	fmt.Printf("%sConfigs:      %d%s\n", White, len(s.Config.Configs), Reset)
 	fmt.Printf("%sMTProto:      %d%s\n", White, len(s.Config.MTProto), Reset)
 	fmt.Printf("%sProxy Types:  %d%s\n", White, len(s.Config.Proxies), Reset)
-	
+
 	totalProxies := 0
 	for _, urls := range s.Config.Proxies {
 		totalProxies += len(urls)
 	}
 	fmt.Printf("%sTotal Proxies:%d%s\n", White, totalProxies, Reset)
-	
+
 	fmt.Printf("%sTelegram:     %d%s\n", White, len(s.Config.Telegram), Reset)
 	fmt.Printf("%sCustom:       %d%s\n", White, len(s.Config.Custom), Reset)
 	fmt.Printf("%sSkip Telegram:%v%s\n", White, s.Config.SkipTelegram, Reset)
@@ -424,46 +605,42 @@ func (s *Scraper) ShowConfig() error {
 }
 
 func (s *Scraper) AddSource(url string, sourceType string) error {
-    if s.Config == nil {
-        if err := s.LoadConfig(); err != nil {
-            return err
-        }
-    }
+	if s.Config == nil {
+		if err := s.LoadConfig(); err != nil {
+			return err
+		}
+	}
 
+	if sourceType == "" || sourceType == "auto" {
+		fmt.Printf("%s[ℹ] Auto-detecting type for: %s%s\n", Blue, url, Reset)
+		sourceType = s.DetectSourceType(url)
+		if sourceType == "unknown" {
+			return fmt.Errorf("could not detect source type for %s", url)
+		}
+		fmt.Printf("%s[✓] Detected type: %s%s\n", Green, sourceType, Reset)
+	}
 
-    if sourceType == "" || sourceType == "auto" {
-        fmt.Printf("%s[ℹ] Auto-detecting type for: %s%s\n", Blue, url, Reset)
-        sourceType = s.DetectSourceType(url)
-        if sourceType == "unknown" {
-            return fmt.Errorf("could not detect source type for %s", url)
-        }
-        fmt.Printf("%s[✓] Detected type: %s%s\n", Green, sourceType, Reset)
-    }
+	switch sourceType {
+	case "vless", "vmess", "trojan", "ss", "ssr":
+		s.Config.Configs = append(s.Config.Configs, url)
+	case "mtproto":
+		s.Config.MTProto = append(s.Config.MTProto, url)
+	case "http", "https", "socks4", "socks5":
+		if s.Config.Proxies == nil {
+			s.Config.Proxies = make(map[string][]string)
+		}
+		s.Config.Proxies[sourceType] = append(s.Config.Proxies[sourceType], url)
+	case "telegram":
+		s.Config.Telegram = append(s.Config.Telegram, url)
+	default:
+		s.Config.Custom = append(s.Config.Custom, SourceConfig{
+			URLs:  []string{url},
+			PType: sourceType,
+		})
+	}
 
-
-    switch sourceType {
-    case "vless", "vmess", "trojan", "ss", "ssr":
-        s.Config.Configs = append(s.Config.Configs, url)
-    case "mtproto":
-        s.Config.MTProto = append(s.Config.MTProto, url)
-    case "http", "https", "socks4", "socks5":
-        if s.Config.Proxies == nil {
-            s.Config.Proxies = make(map[string][]string)
-        }
-        s.Config.Proxies[sourceType] = append(s.Config.Proxies[sourceType], url)
-    case "telegram":
-        s.Config.Telegram = append(s.Config.Telegram, url)
-    default:
-        s.Config.Custom = append(s.Config.Custom, SourceConfig{
-            URLs:  []string{url},
-            PType: sourceType,
-        })
-    }
-
-
-    return s.SaveConfig()
+	return s.SaveConfig()
 }
-
 
 func (s *Scraper) RemoveSource(urlToRemove string) error {
 	if s.Config == nil {
@@ -583,16 +760,33 @@ func (s *Scraper) worker(id int, jobs <-chan Job, results chan<- ScrapeResult, w
 	for job := range jobs {
 		fmt.Printf("%s[Worker %d] Scraping %s: %s%s\n", Cyan, id, job.kind, job.name, Reset)
 
-		text, err := s.fetchURL(job.url)
-		if err != nil {
-			fmt.Printf("%s[Worker %d] [✗] Failed: %s - %v%s\n", Red, id, job.name, err, Reset)
-			results <- ScrapeResult{Items: []string{}, SourceType: job.sourceType, Error: err}
+		if job.kind == "telegram" {
+			items, err := s.scrapeTelegramChannel(job.url)
+			if err != nil {
+				fmt.Printf("%s[Worker %d] [✗] Failed: %s - %v%s\n", Red, id, job.name, err, Reset)
+				results <- ScrapeResult{Items: []string{}, SourceType: job.sourceType, Error: err}
+			} else {
+				fmt.Printf("%s[Worker %d] [✓] Success: %s (%d items)%s\n", Green, id, job.name, len(items), Reset)
+				results <- ScrapeResult{Items: items, SourceType: job.sourceType, Error: nil}
+			}
 		} else {
-			vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
-			allItems := append(append(append(append(append(vless, vmess...), trojan...), ss...), mtproto...), proxies...)
-			fmt.Printf("%s[Worker %d] [✓] Success: %s (vless:%d vmess:%d trojan:%d ss:%d mtproto:%d proxy:%d)%s\n",
-				Green, id, job.name, len(vless), len(vmess), len(trojan), len(ss), len(mtproto), len(proxies), Reset)
-			results <- ScrapeResult{Items: allItems, SourceType: job.sourceType, Error: nil}
+			text, err := s.fetchURLWithRetry(job.url, httpFetchRetries)
+			if err != nil {
+				fmt.Printf("%s[Worker %d] [✗] Failed: %s - %v%s\n", Red, id, job.name, err, Reset)
+				results <- ScrapeResult{Items: []string{}, SourceType: job.sourceType, Error: err}
+			} else {
+				vless, vmess, trojan, ss, mtproto, proxies := s.extractConfigsFromText(text)
+				allItems := make([]string, 0, len(vless)+len(vmess)+len(trojan)+len(ss)+len(mtproto)+len(proxies))
+				allItems = append(allItems, vless...)
+				allItems = append(allItems, vmess...)
+				allItems = append(allItems, trojan...)
+				allItems = append(allItems, ss...)
+				allItems = append(allItems, mtproto...)
+				allItems = append(allItems, proxies...)
+				fmt.Printf("%s[Worker %d] [✓] Success: %s (vless:%d vmess:%d trojan:%d ss:%d mtproto:%d proxy:%d)%s\n",
+					Green, id, job.name, len(vless), len(vmess), len(trojan), len(ss), len(mtproto), len(proxies), Reset)
+				results <- ScrapeResult{Items: allItems, SourceType: job.sourceType, Error: nil}
+			}
 		}
 
 		completed := atomic.AddInt64(completedJobs, 1)
@@ -607,9 +801,9 @@ func (s *Scraper) saveResults(vless, vmess, trojan, ss, mtproto, proxies map[str
 	}
 
 	files := map[string][]string{
-		filepath.Join(s.OutputDir, "vless.txt"):    vless["items"],
-		filepath.Join(s.OutputDir, "vmess.txt"):    vmess["items"],
-		filepath.Join(s.OutputDir, "trojan.txt"):   trojan["items"],
+		filepath.Join(s.OutputDir, "vless.txt"):   vless["items"],
+		filepath.Join(s.OutputDir, "vmess.txt"):   vmess["items"],
+		filepath.Join(s.OutputDir, "trojan.txt"):  trojan["items"],
 		filepath.Join(s.OutputDir, "ss.txt"):      ss["items"],
 		filepath.Join(s.OutputDir, "mtproto.txt"): mtproto["items"],
 		filepath.Join(s.OutputDir, "http.txt"):    proxies["http"],
@@ -735,27 +929,29 @@ func (s *Scraper) Run() error {
 			continue
 		}
 
-		if result.SourceType != "" && (result.SourceType == "http" || result.SourceType == "https" || result.SourceType == "socks4" || result.SourceType == "socks5") {
+		if result.SourceType == "http" || result.SourceType == "https" || result.SourceType == "socks4" || result.SourceType == "socks5" {
 			for _, item := range result.Items {
 				if strings.Contains(item, ":") && proxyRegex.MatchString(item) {
 					resultsMap.Proxies[result.SourceType] = append(resultsMap.Proxies[result.SourceType], item)
 				}
 			}
-		} else {
-			for _, item := range result.Items {
-				if strings.HasPrefix(item, "vless://") {
-					resultsMap.Vless["items"] = append(resultsMap.Vless["items"], item)
-				} else if strings.HasPrefix(item, "vmess://") {
-					resultsMap.Vmess["items"] = append(resultsMap.Vmess["items"], item)
-				} else if strings.HasPrefix(item, "trojan://") {
-					resultsMap.Trojan["items"] = append(resultsMap.Trojan["items"], item)
-				} else if strings.HasPrefix(item, "ss://") || strings.HasPrefix(item, "ssr://") {
-					resultsMap.SS["items"] = append(resultsMap.SS["items"], item)
-				} else if strings.Contains(item, "t.me/proxy") || strings.Contains(item, "tg://proxy") {
-					resultsMap.MTProto["items"] = append(resultsMap.MTProto["items"], item)
-				} else if strings.Contains(item, ":") && proxyRegex.MatchString(item) {
-					resultsMap.Proxies["http"] = append(resultsMap.Proxies["http"], item)
-				}
+			continue
+		}
+
+		for _, item := range result.Items {
+			switch {
+			case strings.HasPrefix(item, "vless://"):
+				resultsMap.Vless["items"] = append(resultsMap.Vless["items"], item)
+			case strings.HasPrefix(item, "vmess://"):
+				resultsMap.Vmess["items"] = append(resultsMap.Vmess["items"], item)
+			case strings.HasPrefix(item, "trojan://"):
+				resultsMap.Trojan["items"] = append(resultsMap.Trojan["items"], item)
+			case strings.HasPrefix(item, "ss://") || strings.HasPrefix(item, "ssr://"):
+				resultsMap.SS["items"] = append(resultsMap.SS["items"], item)
+			case strings.Contains(item, "t.me/proxy") || strings.Contains(item, "tg://proxy"):
+				resultsMap.MTProto["items"] = append(resultsMap.MTProto["items"], item)
+			case strings.Contains(item, ":") && proxyRegex.MatchString(item):
+				resultsMap.Proxies["http"] = append(resultsMap.Proxies["http"], item)
 			}
 		}
 	}
@@ -770,14 +966,6 @@ func (s *Scraper) Run() error {
 	resultsMap.Proxies["socks4"] = removeDuplicates(resultsMap.Proxies["socks4"])
 	resultsMap.Proxies["socks5"] = removeDuplicates(resultsMap.Proxies["socks5"])
 
-	return s.saveResults(resultsMap.Vless, resultsMap.Vmess, resultsMap.Trojan, resultsMap.SS, resultsMap.MTProto, resultsMap.Proxies)
-
-	fmt.Println()
-	fmt.Printf("%s%s╔════════════════════════════════════════╗%s\n", Bold, Green, Reset)
-	fmt.Printf("%s%s║         Scraping Completed!            ║%s\n", Bold, White, Reset)
-	fmt.Printf("%s%s╚════════════════════════════════════════╝%s\n", Bold, Green, Reset)
-	fmt.Println()
-
 	if err := s.saveResults(
 		resultsMap.Vless,
 		resultsMap.Vmess,
@@ -790,6 +978,11 @@ func (s *Scraper) Run() error {
 	}
 
 	fmt.Println()
+	fmt.Printf("%s%s╔════════════════════════════════════════╗%s\n", Bold, Green, Reset)
+	fmt.Printf("%s%s║         Scraping Completed!            ║%s\n", Bold, White, Reset)
+	fmt.Printf("%s%s╚════════════════════════════════════════╝%s\n", Bold, Green, Reset)
+	fmt.Println()
+
 	fmt.Printf("%s%s=== Summary ===%s\n", Bold, Cyan, Reset)
 	fmt.Printf("%sVLESS: %d%s\n", White, len(resultsMap.Vless["items"]), Reset)
 	fmt.Printf("%sVMESS: %d%s\n", White, len(resultsMap.Vmess["items"]), Reset)
