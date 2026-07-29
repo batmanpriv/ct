@@ -1,4 +1,3 @@
-```markdown
 <h1 align="center"> CT - Check Test</h1>
 
 <p align="center">
