@@ -28,6 +28,7 @@ import (
 	"github.com/batmanpriv/ct/pc"
 	"github.com/batmanpriv/ct/scraper"
 	"github.com/batmanpriv/ct/xp"
+	"github.com/batmanpriv/ct/cf"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/miekg/dns"
@@ -46,7 +47,7 @@ const (
 	Bold    = "\033[1m"
 )
 
-const VERSION = "1.3.12"
+const VERSION = "1.4.15"
 
 type Module string
 
@@ -193,6 +194,8 @@ func (a *App) Run() error {
 		return runMTProtoModule(ctx, a.Args[1:])
 	case string(ModuleScrape):
 		return runScrapeModule(ctx, a.Args[1:])
+	case "cf":
+		return runCFModule(ctx, a.Args[1:])
 	default:
 		fmt.Println("Unknown command:", a.Args[0])
 		printRootHelp()
@@ -218,6 +221,7 @@ Modules:
   xray       Xray checker / downloader
   mtproto    MTProto checker / downloader
   scrape     Scraper utilities
+  cf         Cloudflare IP scanner
   interactive Guided UI for normal users
 
 Examples:
@@ -239,6 +243,8 @@ Examples:
   ct mtproto download
 
   ct scrape run
+  ct cf scan
+  ct cf scan -workers 200 -ports 443,8443
   ct interactive`)
 }
 
@@ -353,6 +359,24 @@ func runMTProtoModule(ctx *AppContext, args []string) error {
 
 	default:
 		printMTProtoHelp()
+		return nil
+	}
+}
+
+func runCFModule(ctx *AppContext, args []string) error {
+	if len(args) == 0 {
+		printCFHelp()
+		return nil
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "help", "-h", "--help":
+		printCFHelp()
+		return nil
+	case "scan":
+		return runCFScan(args[1:])
+	default:
+		printCFHelp()
 		return nil
 	}
 }
@@ -480,6 +504,139 @@ func scrapeShowConfig(ctx *AppContext) error {
 	return s.ShowConfig()
 }
 
+func runCFScan(args []string) error {
+	config := &cf.ScanConfig{
+		Sources:          []string{"cloudflare"},
+		WorkerCount:      100,
+		Ports:            []int{443, 80, 2053, 2083, 2087, 2096, 8443},
+		EnableHTTP2:      true,
+		EnableHTTP3:      true,
+		EnableSpeedTest:  false,
+		EnableGeoIP:      false,
+		EnableReverseDNS: true,
+		OutputFormat:     "json",
+		OutputPath:       "results.json",
+		TestDomain:       "www.cloudflare.com",
+		RateLimit:        1000,
+		RealTimePrint:    true,
+		ShowProgress:     true,
+		MaxResults:       20,
+		Timeout:          5,
+		PortScanTimeout:  2,
+		SortBy:           "score",
+		NoColor:          false,
+		MaxIPsPerRange:   10000,
+	}
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-source":
+			if i+1 < len(args) {
+				config.Sources = strings.Split(args[i+1], ",")
+				i++
+			}
+		case "-workers":
+			if i+1 < len(args) {
+				config.WorkerCount, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-ports":
+			if i+1 < len(args) {
+				portStrs := strings.Split(args[i+1], ",")
+				var ports []int
+				for _, p := range portStrs {
+					if port, err := strconv.Atoi(p); err == nil {
+						ports = append(ports, port)
+					}
+				}
+				config.Ports = ports
+				i++
+			}
+		case "-domain":
+			if i+1 < len(args) {
+				config.TestDomain = args[i+1]
+				i++
+			}
+		case "-output":
+			if i+1 < len(args) {
+				config.OutputPath = args[i+1]
+				i++
+			}
+		case "-format":
+			if i+1 < len(args) {
+				config.OutputFormat = args[i+1]
+				i++
+			}
+		case "-geoip":
+			if i+1 < len(args) {
+				config.GeoIPDBPath = args[i+1]
+				config.EnableGeoIP = true
+				i++
+			}
+		case "-speed":
+			config.EnableSpeedTest = true
+		case "-timeout":
+			if i+1 < len(args) {
+				config.Timeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-port-timeout":
+			if i+1 < len(args) {
+				config.PortScanTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-max":
+			if i+1 < len(args) {
+				config.MaxResults, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-sort":
+			if i+1 < len(args) {
+				config.SortBy = args[i+1]
+				i++
+			}
+		case "-quiet":
+			config.RealTimePrint = false
+		case "-noprogress":
+			config.ShowProgress = false
+		case "-nocolor":
+			config.NoColor = true
+		}
+	}
+
+	return cf.RunScanner(config)
+}
+
+func printCFHelp() {
+	fmt.Println(`ct cf commands
+
+Usage:
+  ct cf scan [flags]
+
+Flags:
+  -source <source>         IP sources: cloudflare, bgp, asn13335, ipv6 or custom:file.txt
+  -workers <num>           Number of workers (default: 100)
+  -ports <ports>           Ports to scan (comma-separated)
+  -domain <domain>         Test domain (default: www.cloudflare.com)
+  -output <path>           Output file (default: results.json)
+  -format <format>         Output format: json, csv, txt (default: json)
+  -geoip <path>            GeoIP database path
+  -speed                   Enable speed test
+  -timeout <seconds>       HTTP/TLS timeout (default: 5)
+  -port-timeout <seconds>  Port scan timeout (default: 2)
+  -max <num>               Max results to show (default: 20)
+  -sort <sort>             Sort by: score, latency (default: score)
+  -quiet                   Disable real-time output
+  -noprogress              Disable progress
+  -nocolor                 Disable colors
+  -help                    Show this help
+
+Examples:
+  ct cf scan
+  ct cf scan -workers 200 -ports 443,8443
+  ct cf scan -source custom:ips.txt -domain example.com -sort latency`)
+}
+
 func clearScreen() {
 	fmt.Print("\033[2J\033[H")
 }
@@ -516,6 +673,7 @@ func runInteractive(ctx *AppContext) error {
 		"MTProto Checker",
 		"Xray Checker",
 		"Scraper",
+		"Cloudflare Scanner",
 		"Check Update",
 		"Exit",
 	}
@@ -545,6 +703,8 @@ func runInteractive(ctx *AppContext) error {
 			return interactiveXray(ctx)
 		case "Scraper":
 			return interactiveScrape(ctx)
+		case "Cloudflare Scanner":
+			return interactiveCF(ctx)
 		case "Check Update":
 			if err := checkUpdate(); err != nil {
 				fmt.Println(Red + "Error: " + err.Error() + Reset)
@@ -569,6 +729,180 @@ func checkUpdate() error {
 
 	fmt.Printf(Yellow+"New version found: %s -> %s\n"+Reset, VERSION, latest)
 	return installUpdate(latest)
+}
+
+func interactiveCF(ctx *AppContext) error {
+	fmt.Println("\n" + Cyan + "╔════════════════════════════════════════════╗" + Reset)
+	fmt.Println(Cyan + "║        Cloudflare IP Scanner              ║" + Reset)
+	fmt.Println(Cyan + "╚════════════════════════════════════════════╝" + Reset)
+	fmt.Println()
+
+	config := &cf.ScanConfig{
+		Sources:          []string{"cloudflare"},
+		WorkerCount:      100,
+		Ports:            []int{443, 80, 2053, 2083, 2087, 2096, 8443},
+		EnableHTTP2:      true,
+		EnableHTTP3:      true,
+		EnableSpeedTest:  false,
+		EnableGeoIP:      false,
+		EnableReverseDNS: true,
+		OutputFormat:     "txt",
+		OutputPath:       "valid_ips_" + time.Now().Format("20060102_150405") + ".txt",
+		TestDomain:       "www.cloudflare.com",
+		RateLimit:        1000,
+		RealTimePrint:    true,
+		ShowProgress:     true,
+		MaxResults:       20,
+		Timeout:          5,
+		PortScanTimeout:  2,
+		SortBy:           "score",
+		NoColor:          false,
+		MaxIPsPerRange:   10000,
+	}
+
+	defaultRanges := cf.GetCloudflareRanges()
+	allRanges := cf.GetAllCloudflareRanges()
+	
+	fmt.Println(Green + "Default Cloudflare IP Ranges (fast scan):" + Reset)
+	for _, r := range defaultRanges {
+		fmt.Printf("  %s", r)
+	}
+	fmt.Println()
+	
+	timeStr, color := cf.EstimateScanTime(defaultRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
+	fmt.Printf(color+"Estimated scan time with %d workers: %s\n"+Reset, config.WorkerCount, timeStr)
+
+	fmt.Println("\n" + Yellow + "Additional ranges available (slower but more comprehensive):" + Reset)
+	extraRanges := []string{}
+	for _, r := range allRanges {
+		isDefault := false
+		for _, d := range defaultRanges {
+			if r == d {
+				isDefault = true
+				break
+			}
+		}
+		if !isDefault {
+			extraRanges = append(extraRanges, r)
+		}
+	}
+	
+	for i, r := range extraRanges {
+		if i%3 == 0 && i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("  %s", r)
+	}
+	fmt.Println()
+	
+	allTimeStr, allColor := cf.EstimateScanTime(allRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
+	fmt.Printf(allColor+"Full scan with all ranges would take: %s\n"+Reset, allTimeStr)
+	
+	fmt.Println("\n" + Cyan + "Select IP source type:" + Reset)
+	fmt.Println("  1) Cloudflare default ranges (fast)")
+	fmt.Println("  2) All Cloudflare ranges (comprehensive)")
+	fmt.Println("  3) Custom CIDR range(s)")
+	fmt.Println("  4) IP file (one IP per line)")
+	
+	sourceChoice, err := askIntDefault(ctx, "Choose", 1)
+	if err != nil {
+		return err
+	}
+	
+	switch sourceChoice {
+	case 1:
+		config.Sources = []string{"cloudflare"}
+	case 2:
+		config.Sources = []string{"cloudflare_all"}
+	case 3:
+		customRange, err := askLine(ctx, "Enter CIDR range(s) (comma-separated, e.g., 104.16.0.0/13,172.64.0.0/13)")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(customRange) != "" {
+			config.Sources = []string{"range:" + strings.TrimSpace(customRange)}
+		}
+	case 4:
+		file, err := askLine(ctx, "IP file path (one IP per line or CIDR)")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(file) != "" {
+			config.Sources = []string{"custom:" + strings.TrimSpace(file)}
+		}
+	}
+
+	workers, err := askIntDefault(ctx, "Workers (default 100)", 100)
+	if err != nil {
+		return err
+	}
+	config.WorkerCount = workers
+
+	portsInput, err := askLine(ctx, "Ports (comma-separated, default: 443,80,2053,2083,2087,2096,8443)")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(portsInput) != "" {
+		var ports []int
+		for _, p := range strings.Split(portsInput, ",") {
+			if port, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+				ports = append(ports, port)
+			}
+		}
+		if len(ports) > 0 {
+			config.Ports = ports
+		}
+	}
+
+	maxIPs, err := askIntDefault(ctx, "Max IPs per range (default 10000, 0 = unlimited)", 10000)
+	if err != nil {
+		return err
+	}
+	config.MaxIPsPerRange = maxIPs
+
+	domain, err := askLine(ctx, "Test domain (default: www.cloudflare.com)")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(domain) != "" {
+		config.TestDomain = domain
+	}
+
+	fmt.Println("\n" + Cyan + "╔════════════════════════════════════════════╗" + Reset)
+	fmt.Println(Cyan + "║           Scan Configuration                ║" + Reset)
+	fmt.Println(Cyan + "╚════════════════════════════════════════════╝" + Reset)
+	fmt.Printf("%sSource:%s %v\n", Green, Reset, config.Sources)
+	fmt.Printf("%sWorkers:%s %d\n", Green, Reset, config.WorkerCount)
+	fmt.Printf("%sPorts:%s %v\n", Green, Reset, config.Ports)
+	fmt.Printf("%sDomain:%s %s\n", Green, Reset, config.TestDomain)
+	fmt.Printf("%sMax IPs per range:%s %d\n", Green, Reset, config.MaxIPsPerRange)
+	
+	var finalRanges []string
+	if len(config.Sources) > 0 && strings.HasPrefix(config.Sources[0], "range:") {
+		fmt.Printf("%sCustom ranges:%s %s\n", Yellow, Reset, strings.TrimPrefix(config.Sources[0], "range:"))
+	} else if len(config.Sources) > 0 && strings.HasPrefix(config.Sources[0], "custom:") {
+		fmt.Printf("%sIP file:%s %s\n", Yellow, Reset, strings.TrimPrefix(config.Sources[0], "custom:"))
+	} else {
+		if sourceChoice == 2 {
+			finalRanges = allRanges
+		} else {
+			finalRanges = defaultRanges
+		}
+		finalTimeStr, finalColor := cf.EstimateScanTime(finalRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
+		fmt.Printf("%sEstimated time:%s %s%s\n", Yellow, Reset, finalColor, finalTimeStr)
+	}
+
+	fmt.Println("\n" + Green + "Starting scan..." + Reset)
+
+	if err := cf.RunScanner(config); err != nil {
+		fmt.Println(Red + "Error: " + err.Error() + Reset)
+		return err
+	}
+
+	fmt.Println("\n" + Yellow + "Press Enter to continue..." + Reset)
+	ctx.Reader.ReadString('\n')
+
+	return nil
 }
 
 func fetchLatestVersion() (string, error) {
