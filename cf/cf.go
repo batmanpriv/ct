@@ -40,9 +40,7 @@ const (
 	BufferSize    = 10000
 )
 
-// ScanResult holds everything learned about one candidate IP:port. Fields
-// that were previously guessed or mis-measured are documented with what
-// they now actually represent.
+
 type ScanResult struct {
 	IP           string `json:"ip" yaml:"ip" csv:"ip"`
 	Port         int    `json:"port" yaml:"port" csv:"port"`
@@ -56,23 +54,12 @@ type ScanResult struct {
 	ASN          string `json:"asn" yaml:"asn" csv:"asn"`
 	Hostname     string `json:"hostname" yaml:"hostname" csv:"hostname"`
 
-	// CloudflareConfidence is a weighted 0-100 confidence score (see
-	// classifyOrigin) instead of the old single true/false CF-Ray check.
 	CloudflareConfidence int `json:"cloudflare_confidence" yaml:"cloudflare_confidence" csv:"cloudflare_confidence"`
-	// IsGenuineCFRange is ground truth: the IP literally falls inside
-	// Cloudflare's officially published IP ranges (ips-v4/ips-v6).
+
 	IsGenuineCFRange bool `json:"is_genuine_cf_range" yaml:"is_genuine_cf_range" csv:"is_genuine_cf_range"`
-	// IsProxy now means "looks like Cloudflare (headers/TLS) but the IP is
-	// NOT in Cloudflare's official ranges" - i.e. something is fronting or
-	// impersonating Cloudflare rather than being genuine edge. This is a
-	// real, checkable signal, unlike the old hostname-substring guess.
+
 	IsProxy bool `json:"is_proxy" yaml:"is_proxy" csv:"is_proxy"`
 
-	// Datacenter is the IATA airport code suffix of CF-Ray (e.g. "SJC"),
-	// which is the only thing CF-Ray actually encodes about the edge node.
-	// The old EdgeType field guessed "Worker/Cache/Spectrum" from CF-Ray,
-	// which CF-Ray does not contain; EdgeType now reports the negotiated
-	// protocol (http1.1/h2/h3) instead, which we can actually observe.
 	Datacenter string `json:"datacenter" yaml:"datacenter" csv:"datacenter"`
 	EdgeType   string `json:"edge_type" yaml:"edge_type" csv:"edge_type"`
 
@@ -82,11 +69,7 @@ type ScanResult struct {
 	TLSSNI      string `json:"tls_sni" yaml:"tls_sni" csv:"tls_sni"`
 	CertIssuer  string `json:"cert_issuer" yaml:"cert_issuer" csv:"cert_issuer"`
 	CertSAN     string `json:"cert_san" yaml:"cert_san" csv:"cert_san"`
-	// TLSFingerprint is a simplified fingerprint (sha256 of negotiated
-	// version|cipher|ALPN) truncated to 16 hex chars. It is NOT JA3/JA4:
-	// those fingerprint a TLS *client's* ClientHello. A byte-accurate
-	// server-side equivalent (JA3S/JA4S) would require capturing the raw
-	// ServerHello before Go's crypto/tls parses it, which this does not do.
+
 	TLSFingerprint string `json:"tls_fingerprint" yaml:"tls_fingerprint" csv:"tls_fingerprint"`
 
 	CertExpiry time.Time `json:"cert_expiry" yaml:"cert_expiry" csv:"cert_expiry"`
@@ -110,20 +93,11 @@ type ScanResult struct {
 	DownloadSpeed1MB  float64 `json:"download_speed_1mb" yaml:"download_speed_1mb" csv:"download_speed_1mb"`
 	DownloadSpeed10MB float64 `json:"download_speed_10mb" yaml:"download_speed_10mb" csv:"download_speed_10mb"`
 
-	// PacketLoss is real ICMP-measured loss (%). -1 means it could not be
-	// measured (no raw/unprivileged ICMP socket permission available), so
-	// consumers never mistake "unavailable" for "0% loss".
 	PacketLoss float64 `json:"packet_loss" yaml:"packet_loss" csv:"packet_loss"`
-	// TCPFailureRate is what the old code mislabeled "packet loss": the
-	// fraction of repeated TCP connect attempts that failed outright. Kept
-	// under its honest name since it is still a useful reachability signal.
 	TCPFailureRate float64 `json:"tcp_failure_rate" yaml:"tcp_failure_rate" csv:"tcp_failure_rate"`
 
 	AverageLatency float64 `json:"average_latency" yaml:"average_latency" csv:"average_latency"`
 	MedianLatency  float64 `json:"median_latency" yaml:"median_latency" csv:"median_latency"`
-	// Jitter is now the stddev of steady-state request RTTs sampled over a
-	// single persistent TLS connection (see rttSamples), not repeated fresh
-	// TCP handshakes, which conflate DNS/SYN-queue/kernel noise with jitter.
 	Jitter float64 `json:"jitter" yaml:"jitter" csv:"jitter"`
 
 	Ports     []int     `json:"ports" yaml:"ports" csv:"ports"`
@@ -184,12 +158,7 @@ type ScanConfig struct {
 	OutputFormat     string
 	OutputPath       string
 	TestDomain       string
-	// SpeedTestHost is the Host/SNI used only for the throughput sub-test.
-	// speed.cloudflare.com is Cloudflare's own speed-test service and is
-	// the only common CF-fronted host guaranteed to serve /__down; ordinary
-	// customer zones behind Cloudflare generally do not. We still connect
-	// to the candidate edge IP directly, just with this Host/SNI, so the
-	// measurement still reflects that specific edge node's throughput.
+
 	SpeedTestHost      string
 	RateLimit          int
 	RealTimePrint      bool
@@ -231,9 +200,6 @@ type WorkerPool struct {
 	validMu    sync.Mutex
 	goodCount  int64
 
-	// cfRanges is the parsed set of Cloudflare's officially published IP
-	// ranges, used as ground truth for CloudflareConfidence/IsProxy. It is
-	// fetched once (with a hardcoded fallback) and shared read-only.
 	cfRanges []*net.IPNet
 }
 
@@ -626,23 +592,6 @@ func (wp *WorkerPool) updateStats(result ScanResult) {
 	}
 }
 
-// ============================================================================
-// Scan pipeline
-//
-// Stages run in increasing cost order, and each stage only runs if the
-// previous one gave a reason to believe it's worth the extra connections.
-// This is the fix for "10 connections per IP x 500k IPs": most IPs die at
-// Stage 1 (a single cheap TCP dial) and never reach the expensive stages.
-//
-//   Stage 1: TCP reachability (cheap, always runs)
-//   Stage 2: HTTP/TLS validation (only if Stage 1 succeeded)
-//   Stage 3: HTTP/3 + reverse DNS (only if Stage 2 got a real HTTP response)
-//   Stage 4: GeoIP/ASN (local DB lookups, no network - basically free)
-//   Stage 5: RTT samples / packet loss / speed test (only if Stage 2 passed
-//            AND the caller actually enabled these, since they're the most
-//            expensive per-IP stages)
-// ============================================================================
-
 func (wp *WorkerPool) scanIP(ip net.IP) ScanResult {
 	result := ScanResult{
 		IP:        ip.String(),
@@ -654,7 +603,6 @@ func (wp *WorkerPool) scanIP(ip net.IP) ScanResult {
 		return result
 	}
 
-	// --- Stage 1: TCP reachability ---
 	ports := wp.config.Ports
 	if len(ports) == 0 {
 		ports = []int{443}
@@ -700,11 +648,9 @@ func (wp *WorkerPool) scanIP(ip net.IP) ScanResult {
 	}
 	sort.Ints(result.Ports)
 
-	// --- Stage 2: HTTP/TLS validation ---
 	wp.probeHTTP(ip, result.Port, &result)
 	httpValidated := result.TTFBMs > 0 || result.CFRay != "" || result.ServerHeader != ""
 
-	// --- Stage 3: HTTP/3 + reverse DNS (only worth it if stage 2 answered) ---
 	if httpValidated {
 		var wg sync.WaitGroup
 		if wp.config.EnableHTTP3 {
@@ -724,22 +670,14 @@ func (wp *WorkerPool) scanIP(ip net.IP) ScanResult {
 		wg.Wait()
 	}
 
-	// --- Stage 4: GeoIP/ASN (local DB, essentially free) ---
 	if wp.config.EnableGeoIP && wp.geoDB != nil {
 		wp.getGeoIP(ip, &result)
 	}
 
-	// --- Origin classification (needs CF ranges + headers, cheap) ---
-	// Must run before getASN: getASN's Cloudflare fallback reads
-	// result.IsGenuineCFRange, which classifyOrigin is what sets it.
 	wp.classifyOrigin(&result)
 	wp.detectDatacenter(&result)
 	wp.getASN(ip, &result)
 
-	// --- Stage 5: expensive per-connection measurements ---
-	// Only bother with repeated RTT samples, ICMP loss, and a real
-	// throughput test on IPs that actually served something in Stage 2 -
-	// a TCP port that's open but not speaking HTTP still gets none of this.
 	if httpValidated {
 		latencies, failures := wp.rttSamples(ip, result.Port)
 		wp.applyLatencyStats(latencies, failures, &result)
@@ -948,13 +886,6 @@ func (wp *WorkerPool) testHTTP3(ip net.IP, port int, result *ScanResult) {
 	}
 }
 
-// rttSamples measures steady-state round-trip time by issuing repeated
-// small HTTPS requests over a single kept-alive connection, instead of the
-// old approach of opening a brand-new TCP connection for every sample
-// (which mixes in DNS/SYN-queue/kernel scheduling noise unrelated to network
-// jitter). The first request pays the connection setup cost and is
-// discarded from the jitter calculation; subsequent requests reuse the same
-// connection.
 func (wp *WorkerPool) rttSamples(ip net.IP, port int) ([]float64, int) {
 	n := wp.config.LatencySamples
 	if n <= 0 {
@@ -1002,7 +933,6 @@ func (wp *WorkerPool) rttSamples(ip net.IP, port int) ([]float64, int) {
 		resp.Body.Close()
 
 		if i == 0 {
-			// Discard the first round trip: it includes connection setup.
 			continue
 		}
 		latencies = append(latencies, float64(time.Since(start).Microseconds())/1000)
@@ -1045,11 +975,6 @@ func (wp *WorkerPool) applyLatencyStats(latencies []float64, failures int, resul
 	result.Jitter = math.Sqrt(variance)
 }
 
-// icmpPacketLoss sends `count` ICMP echo requests and reports real loss.
-// It first tries an unprivileged "datagram" ICMP socket (works without root
-// on Linux/macOS when the OS allows it), then falls back to a privileged
-// raw socket. If neither is permitted, ok=false and the caller must not
-// report a fabricated 0% loss.
 func icmpPacketLoss(ip net.IP, count int, timeout time.Duration) (lossPercent float64, ok bool) {
 	isV4 := ip.To4() != nil
 
@@ -1083,10 +1008,6 @@ func icmpPacketLoss(ip net.IP, count int, timeout time.Duration) (lossPercent fl
 	}
 	defer conn.Close()
 
-	// The unprivileged "udp" mode expects a *net.UDPAddr destination; the
-	// privileged raw "ip:icmp" mode expects a *net.IPAddr. Using the wrong
-	// one silently breaks delivery, so pick it based on which mode actually
-	// bound successfully above.
 	var dst net.Addr
 	if usingRaw {
 		dst = &net.IPAddr{IP: ip}
@@ -1146,12 +1067,6 @@ func icmpPacketLoss(ip net.IP, count int, timeout time.Duration) (lossPercent fl
 	return float64(sent-received) / float64(sent) * 100, true
 }
 
-// testSpeed measures real throughput by downloading for up to a bounded
-// window and counting actual bytes received, instead of trusting a
-// "?speed=N" query parameter to control response size (the old
-// /cdn-cgi/trace endpoint does not do this at all - /cdn-cgi/trace returns
-// a few lines of plaintext regardless of any speed= parameter, so the old
-// DownloadSpeed numbers were measuring almost nothing).
 func (wp *WorkerPool) testSpeed(ip net.IP, port int, result *ScanResult) {
 	timeout := time.Duration(wp.config.Timeout) * time.Second
 	if timeout < 30*time.Second {
@@ -1212,9 +1127,6 @@ func (wp *WorkerPool) testSpeed(ip net.IP, port int, result *ScanResult) {
 			continue
 		}
 
-		// Count actual bytes received rather than assuming the server
-		// honored the requested size; a truncated/short response still
-		// yields an honest (if lower) throughput number this way.
 		downloaded, err := io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if err != nil || downloaded == 0 {
@@ -1272,11 +1184,6 @@ func (wp *WorkerPool) getReverseDNS(ip net.IP, result *ScanResult) {
 	result.Hostname = names[0]
 }
 
-// detectDatacenter extracts ONLY what CF-Ray actually encodes: a hex
-// request ID and the IATA airport code of the handling edge datacenter
-// (e.g. "834b1e2b1e2b1e2b-SJC"). It no longer guesses "Worker/Cache/
-// Spectrum" from CF-Ray, since CF-Ray does not contain that information -
-// EdgeType instead reports the protocol we actually observed.
 func (wp *WorkerPool) detectDatacenter(result *ScanResult) {
 	if result.CFRay != "" {
 		if idx := strings.LastIndex(result.CFRay, "-"); idx >= 0 && idx+1 < len(result.CFRay) {
@@ -1299,20 +1206,6 @@ func (wp *WorkerPool) detectDatacenter(result *ScanResult) {
 	}
 }
 
-// classifyOrigin replaces both the old validateCloudflare (a hardcoded
-// true/false threshold) and detectProxy (a "hostname contains proxy"
-// substring guess, which the reviewer correctly pointed out has no real
-// signal value). It computes:
-//
-//   - IsGenuineCFRange: ground truth, IP literally inside Cloudflare's
-//     officially published ranges (the strongest signal available).
-//   - CloudflareConfidence: a weighted 0-100 score combining that ground
-//     truth with header/TLS/protocol signals, since any single header can
-//     be spoofed by another CDN but the combination is much harder to fake.
-//   - IsProxy: true only when headers/TLS look like Cloudflare but the IP
-//     is NOT actually in Cloudflare's ranges - i.e. something is fronting
-//     or impersonating Cloudflare, which is the only well-defined meaning
-//     "proxy" can have in this context.
 func (wp *WorkerPool) classifyOrigin(result *ScanResult) {
 	ip := net.ParseIP(result.IP)
 	result.IsGenuineCFRange = ip != nil && ipInRanges(ip, wp.cfRanges)
@@ -1325,7 +1218,7 @@ func (wp *WorkerPool) classifyOrigin(result *ScanResult) {
 	san := strings.ToLower(result.CertSAN)
 
 	signals := []signal{
-		{result.IsGenuineCFRange, 35}, // ground truth beats any header
+		{result.IsGenuineCFRange, 35}, 
 		{result.CFRay != "", 15},
 		{strings.EqualFold(result.ServerHeader, "cloudflare"), 15},
 		{result.CFCacheStatus != "", 8},
@@ -1355,10 +1248,6 @@ func (wp *WorkerPool) classifyOrigin(result *ScanResult) {
 	result.IsProxy = looksLikeCF && !result.IsGenuineCFRange
 }
 
-// calculateScore produces a 0-100 score from explicit, normalized weights
-// instead of hand-picked +N bonuses that didn't sum to any particular
-// scale: Latency 30, TCPFailureRate 20, HTTP3 10, TLS quality 10,
-// Download speed 20, Cloudflare confidence 10.
 func (wp *WorkerPool) calculateScore(r *ScanResult) int {
 	if !r.IsAlive {
 		return 0
@@ -1449,25 +1338,12 @@ func tlsVersionString(version uint16) string {
 	}
 }
 
-// simpleTLSFingerprint is an honest, simplified fingerprint - NOT JA3/JA4.
-// It hashes what Go's crypto/tls actually exposes about the negotiated
-// session (version|cipher|ALPN), which is enough to notice "these two
-// edges negotiate identically" but is not a byte-accurate protocol
-// fingerprint of the ServerHello/extension order the way JA3S/JA4S are.
 func simpleTLSFingerprint(version uint16, cipher uint16, alpn string) string {
 	raw := fmt.Sprintf("%d|%d|%s", version, cipher, alpn)
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// ============================================================================
-// Cloudflare IP ranges (ground truth for classifyOrigin)
-// ============================================================================
-
-// fallbackCFv4Ranges / fallbackCFv6Ranges are used only if the live fetch
-// from cloudflare.com fails (e.g. offline scan). They are a point-in-time
-// snapshot and WILL drift from Cloudflare's actual current ranges, so the
-// live fetch is always attempted first.
 var fallbackCFv4Ranges = []string{
 	"103.21.24.0/22", "103.22.200.0/22", "103.31.4.0/22",
 	"104.16.0.0/13", "104.24.0.0/14", "108.162.192.0/18",
@@ -1494,9 +1370,6 @@ func GetCloudflareIPv6Ranges() []string {
 	return fallbackCFv6Ranges
 }
 
-// fetchOfficialCFRanges fetches https://www.cloudflare.com/ips-v4 and
-// ips-v6 (plain text, one CIDR per line - Cloudflare's own published
-// source of truth) and falls back to the hardcoded snapshot on any error.
 func fetchOfficialCFRanges() []*net.IPNet {
 	var cidrs []string
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -1547,19 +1420,6 @@ func ipInRanges(ip net.IP, ranges []*net.IPNet) bool {
 	return false
 }
 
-// ============================================================================
-// CIDR expansion / sampling
-//
-// Rewritten to use math/big for all offset arithmetic. The previous
-// version clamped the address-space size to 2^62 before sampling, which
-// for something like an IPv6 /32 (2^96 addresses) silently sampled only
-// from the first 2^62 addresses - a razor-thin, non-representative sliver
-// of the range. Stride sampling (evenly spaced buckets, one random pick
-// per bucket) also replaces independent-random-with-collision-retry,
-// giving deterministic full-range coverage instead of a chance of
-// clustering, and avoiding the unbounded retry loop for near-full ranges.
-// ============================================================================
-
 func addBigOffset(base net.IP, offset *big.Int) net.IP {
 	baseInt := new(big.Int).SetBytes(base)
 	sum := new(big.Int).Add(baseInt, offset)
@@ -1607,12 +1467,6 @@ func expandCIDR(cidr string, limit int, random bool) []net.IP {
 	return strideSample(base, total, limit)
 }
 
-// strideSample splits [0, total) into `limit` evenly-sized buckets and
-// picks one uniformly random offset from each bucket. This spans the
-// entire address range by construction (unlike pure random sampling, which
-// can cluster or, for enormous ranges, effectively never touch most of the
-// space) and needs no collision retries since bucket boundaries guarantee
-// distinct picks.
 func strideSample(base net.IP, total *big.Int, limit int) []net.IP {
 	stride := new(big.Int).Div(total, big.NewInt(int64(limit)))
 	if stride.Sign() == 0 {
@@ -1644,9 +1498,6 @@ func strideSample(base net.IP, total *big.Int, limit int) []net.IP {
 	return ips
 }
 
-// randomBigInt returns a uniform random value in [0, max) for arbitrarily
-// large max, using math/rand as the entropy source (this tool has no need
-// for cryptographic randomness - it's picking scan targets, not secrets).
 func randomBigInt(max *big.Int) *big.Int {
 	if max.Sign() <= 0 {
 		return big.NewInt(0)
@@ -1654,7 +1505,6 @@ func randomBigInt(max *big.Int) *big.Int {
 	if max.IsInt64() && max.Int64() <= 1<<62 {
 		return big.NewInt(rand.Int63n(max.Int64()))
 	}
-	// For values beyond int64 range, build up enough random bits.
 	bitLen := max.BitLen()
 	byteLen := (bitLen + 7) / 8
 	buf := make([]byte, byteLen)
@@ -1803,22 +1653,6 @@ func collectCustomFile(filename string) ([]net.IP, error) {
 	return ips, scanner.Err()
 }
 
-// ============================================================================
-// Streaming result writer
-//
-// Replaces accumulating every scanned IP (alive or dead) into a single
-// `results []ScanResult` slice held in RAM for the whole run. For a
-// 500k-5M IP scan that slice alone could be gigabytes. Instead, each
-// result is written to disk as soon as it arrives; peak memory now depends
-// only on MaxResults (the bounded "top results" list used for the live
-// console view and the final summary), not on the total scan size.
-//
-// Trade-off: a streamed file reflects scan-completion order, not global
-// sort order (you cannot sort a stream without buffering it). The bounded
-// top-results list IS fully sorted, and is additionally written out as its
-// own small file so you still get a sorted view of the best hits.
-// ============================================================================
-
 type resultWriter struct {
 	format string
 	file   *os.File
@@ -1887,7 +1721,7 @@ func (rw *resultWriter) Write(r ScanResult) error {
 		}
 		_, err := fmt.Fprintf(rw.file, "%s:%d\n", r.IP, r.Port)
 		return err
-	default: // json
+	default: 
 		prefix := ",\n"
 		if !rw.jsonStarted {
 			prefix = ""
@@ -1945,8 +1779,6 @@ func csvRow(r ScanResult) []string {
 	}
 }
 
-// writeTopResults writes the bounded, fully-sorted top-N list as a small
-// separate JSON file, since the main output is streamed in scan order.
 func writeTopResults(results []ScanResult, path string) error {
 	file, err := os.Create(path)
 	if err != nil {
@@ -2248,8 +2080,6 @@ func RunScanner(config *ScanConfig) error {
 	var wg sync.WaitGroup
 	pool.Start(&wg)
 
-	// The collector goroutine streams each result straight to disk instead
-	// of accumulating a `[]ScanResult` slice - this is the memory fix.
 	var collector sync.WaitGroup
 	collector.Add(1)
 	go func() {
