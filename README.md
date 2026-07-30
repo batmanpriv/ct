@@ -1,7 +1,7 @@
 <h1 align="center"> CT - Check Test</h1>
 
 <p align="center">
-Version: 1.4.15
+Version: 1.4.16
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
