@@ -267,7 +267,7 @@ Interactive mode is the easiest way to use CT if you do not want to remember fla
 ### Using Go Install
 
 ```bash
-go install github.com/batmanpriv/ct@v1.4.15
+go install github.com/batmanpriv/ct@v1.4.16
 ```
 
 ### Build from Source
