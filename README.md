@@ -1,7 +1,7 @@
 <h1 align="center"> CT - Check Test</h1>
 
 <p align="center">
-Version: 1.4.16
+Version: 1.4.17
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -267,7 +267,7 @@ Interactive mode is the easiest way to use CT if you do not want to remember fla
 ### Using Go Install
 
 ```bash
-go install github.com/batmanpriv/ct@v1.4.16
+go install github.com/batmanpriv/ct@latest
 ```
 
 ### Build from Source
