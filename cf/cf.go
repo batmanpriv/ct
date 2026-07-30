@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"encoding/base64"
 	"math"
 	"math/big"
 	"math/rand"
@@ -102,6 +104,12 @@ type ScanResult struct {
 
 	Ports     []int     `json:"ports" yaml:"ports" csv:"ports"`
 	ScannedAt time.Time `json:"scanned_at" yaml:"scanned_at" csv:"scanned_at"`
+
+	ConfigTested    bool    `json:"config_tested" yaml:"config_tested" csv:"config_tested"`
+	ConfigTestOK    bool    `json:"config_test_ok" yaml:"config_test_ok" csv:"config_test_ok"`
+	ConfigTestError string  `json:"config_test_error" yaml:"config_test_error" csv:"config_test_error"`
+	ConfigTestMs    float64 `json:"config_test_ms" yaml:"config_test_ms" csv:"config_test_ms"`
+	ConfigFinalURI  string  `json:"config_final_uri" yaml:"config_final_uri" csv:"config_final_uri"`
 }
 
 type ScoreWeights struct {
@@ -114,6 +122,457 @@ type ScoreWeights struct {
 	LatencyRefMs float64 `yaml:"latency_ref_ms"`
 	SpeedRefMBps float64 `yaml:"speed_ref_mbps"`
 }
+
+type ParsedProxyConfig struct {
+	Raw       string 
+	Protocol  string 
+	UUID      string 
+	OrigHost  string 
+	OrigPort  int
+	Path      string 
+	HostHdr   string 
+	SNI       string 
+	ALPN      []string
+	Security  string 
+	Network   string 
+	Insecure  bool
+	Fp        string
+	Tag       string 
+}
+
+func ParseProxyConfigLine(line string) (*ParsedProxyConfig, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, fmt.Errorf("empty config line")
+	}
+
+	switch {
+	case strings.HasPrefix(line, "vmess://"):
+		return parseVMess(line)
+	case strings.HasPrefix(line, "trojan://"),
+		strings.HasPrefix(line, "vless://"),
+		strings.HasPrefix(line, "ss://"):
+		return parseURIStyle(line)
+	default:
+		return nil, fmt.Errorf("unsupported or unrecognized config scheme")
+	}
+}
+
+func parseURIStyle(line string) (*ParsedProxyConfig, error) {
+	u, err := url.Parse(line)
+	if err != nil {
+		return nil, fmt.Errorf("invalid config url: %w", err)
+	}
+
+	host := u.Hostname()
+	portStr := u.Port()
+	port := 443
+	if portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+	}
+
+	q := u.Query()
+	pc := &ParsedProxyConfig{
+		Raw:      line,
+		Protocol: strings.ToLower(u.Scheme),
+		UUID:     u.User.Username(),
+		OrigHost: host,
+		OrigPort: port,
+		Path:     firstNonEmpty(q.Get("path"), "/"),
+		HostHdr:  firstNonEmpty(q.Get("host"), host),
+		SNI:      firstNonEmpty(q.Get("sni"), q.Get("peer"), host),
+		Security: firstNonEmpty(q.Get("security"), "tls"),
+		Network:  firstNonEmpty(q.Get("type"), "tcp"),
+		Fp:       q.Get("fp"),
+		Tag:      u.Fragment,
+	}
+
+	if alpn := q.Get("alpn"); alpn != "" {
+		pc.ALPN = strings.Split(alpn, ",")
+	}
+
+	insecureVal := firstNonEmpty(q.Get("allowInsecure"), q.Get("insecure"))
+	pc.Insecure = insecureVal == "1" || strings.EqualFold(insecureVal, "true")
+
+	if pc.Protocol == "ss" && pc.UUID == "" {
+		
+		if dec, err := decodeFlexibleBase64(u.User.String()); err == nil {
+			pc.UUID = string(dec)
+		}
+	}
+
+	return pc, nil
+}
+
+type vmessJSON struct {
+	V    string `json:"v"`
+	Ps   string `json:"ps"`
+	Add  string `json:"add"`
+	Port string `json:"port"`
+	ID   string `json:"id"`
+	Aid  string `json:"aid"`
+	Net  string `json:"net"`
+	Type string `json:"type"`
+	Host string `json:"host"`
+	Path string `json:"path"`
+	TLS  string `json:"tls"`
+	SNI  string `json:"sni"`
+	Alpn string `json:"alpn"`
+	Fp   string `json:"fp"`
+}
+
+func parseVMess(line string) (*ParsedProxyConfig, error) {
+	payload := strings.TrimPrefix(line, "vmess://")
+	
+	payload = strings.SplitN(payload, "#", 2)[0]
+
+	dec, err := decodeFlexibleBase64(payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid vmess base64: %w", err)
+	}
+
+	var vj vmessJSON
+	if err := json.Unmarshal(dec, &vj); err != nil {
+		return nil, fmt.Errorf("invalid vmess json: %w", err)
+	}
+
+	port := 443
+	if p, err := strconv.Atoi(strings.TrimSpace(vj.Port)); err == nil {
+		port = p
+	}
+
+	pc := &ParsedProxyConfig{
+		Raw:      line,
+		Protocol: "vmess",
+		UUID:     vj.ID,
+		OrigHost: vj.Add,
+		OrigPort: port,
+		Path:     firstNonEmpty(vj.Path, "/"),
+		HostHdr:  firstNonEmpty(vj.Host, vj.Add),
+		SNI:      firstNonEmpty(vj.SNI, vj.Host, vj.Add),
+		Security: firstNonEmpty(vj.TLS, "none"),
+		Network:  firstNonEmpty(vj.Net, "tcp"),
+		Fp:       vj.Fp,
+		Tag:      vj.Ps,
+	}
+	if vj.Alpn != "" {
+		pc.ALPN = strings.Split(vj.Alpn, ",")
+	}
+	return pc, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func decodeFlexibleBase64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	tryList := []func(string) ([]byte, error){
+		base64.StdEncoding.DecodeString,
+		base64.URLEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+		base64.RawURLEncoding.DecodeString,
+	}
+	var lastErr error
+	for _, fn := range tryList {
+		if b, err := fn(s); err == nil {
+			return b, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return nil, lastErr
+}
+
+func LoadConfigLines(input string) ([]string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, fmt.Errorf("empty config input")
+	}
+	
+	if _, err := os.Stat(input); err == nil {
+		f, err := os.Open(input)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		var lines []string
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			lines = append(lines, expandIfBase64Subscription(line)...)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
+		if len(lines) == 0 {
+			return nil, fmt.Errorf("no configs found in file")
+		}
+		return lines, nil
+	}
+	
+	return expandIfBase64Subscription(input), nil
+}
+
+func expandIfBase64Subscription(line string) []string {
+	if isKnownScheme(line) {
+		return []string{line}
+	}
+
+	dec, err := decodeFlexibleBase64(line)
+	if err != nil {
+		return []string{line}
+	}
+
+	var out []string
+	for _, l := range strings.Split(string(dec), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if isKnownScheme(l) {
+			out = append(out, l)
+		}
+	}
+	if len(out) == 0 {
+		
+		return []string{line}
+	}
+	return out
+}
+
+func isKnownScheme(s string) bool {
+	return strings.HasPrefix(s, "trojan://") ||
+		strings.HasPrefix(s, "vless://") ||
+		strings.HasPrefix(s, "vmess://") ||
+		strings.HasPrefix(s, "ss://")
+}
+
+type ConfigTestResult struct {
+	OK         bool
+	Error      string
+	DurationMs float64
+	FinalURI   string 
+}
+
+func TestConfigAgainstIP(pc *ParsedProxyConfig, ip net.IP, port int, timeout time.Duration) ConfigTestResult {
+	if timeout <= 0 {
+		timeout = 6 * time.Second
+	}
+	start := time.Now()
+	res := ConfigTestResult{FinalURI: buildFinalURI(pc, ip, port)}
+
+	target := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+
+	security := strings.ToLower(pc.Security)
+	if security == "" || security == "none" {
+		
+		
+		conn, err := net.DialTimeout("tcp", target, timeout)
+		if err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		conn.Close()
+		res.OK = true
+		res.DurationMs = float64(time.Since(start).Microseconds()) / 1000
+		return res
+	}
+
+	sni := firstNonEmpty(pc.SNI, pc.HostHdr, pc.OrigHost)
+	alpn := pc.ALPN
+	if len(alpn) == 0 {
+		alpn = []string{"h2", "http/1.1"}
+	}
+
+	dialer := &net.Dialer{Timeout: timeout}
+	rawConn, err := dialer.Dial("tcp", target)
+	if err != nil {
+		res.Error = fmt.Sprintf("tcp connect failed: %v", err)
+		return res
+	}
+
+	rawConn.SetDeadline(time.Now().Add(timeout))
+
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true, 
+		NextProtos:         alpn,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		rawConn.Close()
+		res.Error = fmt.Sprintf("tls handshake failed (sni=%s): %v", sni, err)
+		return res
+	}
+	defer tlsConn.Close()
+	
+	if strings.EqualFold(pc.Network, "ws") {
+		wsErr := probeWebSocketUpgrade(tlsConn, pc, timeout)
+		if wsErr != nil {
+			res.Error = wsErr.Error()
+			return res
+		}
+	}
+
+	res.OK = true
+	res.DurationMs = float64(time.Since(start).Microseconds()) / 1000
+	return res
+}
+
+func probeWebSocketUpgrade(conn *tls.Conn, pc *ParsedProxyConfig, timeout time.Duration) error {
+	path := pc.Path
+	if path == "" {
+		path = "/"
+	}
+	hostHdr := firstNonEmpty(pc.HostHdr, pc.SNI, pc.OrigHost)
+
+	req, err := http.NewRequest(http.MethodGet, "https://"+hostHdr+path, nil)
+	if err != nil {
+		return fmt.Errorf("build ws request failed: %w", err)
+	}
+	req.Header.Set("Host", hostHdr)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	conn.SetDeadline(time.Now().Add(timeout))
+
+	if err := req.Write(conn); err != nil {
+		return fmt.Errorf("write ws upgrade failed: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		return fmt.Errorf("no ws response from edge (host=%s path=%s): %w", hostHdr, path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return fmt.Errorf("edge rejected ws upgrade: got HTTP %d (host=%s path=%s)", resp.StatusCode, hostHdr, path)
+	}
+	return nil
+}
+
+type configTestWriter struct {
+	ipsFile     *os.File
+	successFile *os.File
+	ipsPath     string
+	successPath string
+	mu          sync.Mutex
+	tested      int
+	succeeded   int
+}
+
+func newConfigTestWriter() (*configTestWriter, error) {
+	ts := time.Now().Format("20060102_150405")
+	ipsPath := fmt.Sprintf("config_tested_ips_%s.txt", ts)
+	successPath := fmt.Sprintf("config_tested_success_%s.txt", ts)
+
+	ipsFile, err := os.Create(ipsPath)
+	if err != nil {
+		return nil, err
+	}
+	successFile, err := os.Create(successPath)
+	if err != nil {
+		ipsFile.Close()
+		return nil, err
+	}
+
+	return &configTestWriter{
+		ipsFile:     ipsFile,
+		successFile: successFile,
+		ipsPath:     ipsPath,
+		successPath: successPath,
+	}, nil
+}
+
+func (w *configTestWriter) Write(r ScanResult) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.tested++
+	if _, err := fmt.Fprintf(w.ipsFile, "%s:%d\n", r.IP, r.Port); err != nil {
+		return err
+	}
+
+	if !r.ConfigTestOK {
+		return nil
+	}
+	w.succeeded++
+	if _, err := fmt.Fprintf(w.successFile, "%s\n", r.ConfigFinalURI); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *configTestWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	err1 := w.ipsFile.Close()
+	err2 := w.successFile.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}
+
+func buildFinalURI(pc *ParsedProxyConfig, ip net.IP, port int) string {
+	if pc == nil {
+		return ""
+	}
+
+	switch pc.Protocol {
+	case "vmess":
+		
+		vj := vmessJSON{
+			V:    "2",
+			Ps:   pc.Tag,
+			Add:  ip.String(),
+			Port: strconv.Itoa(port),
+			ID:   pc.UUID,
+			Aid:  "0",
+			Net:  pc.Network,
+			Host: pc.HostHdr,
+			Path: pc.Path,
+			TLS:  pc.Security,
+			SNI:  pc.SNI,
+			Fp:   pc.Fp,
+		}
+		if len(pc.ALPN) > 0 {
+			vj.Alpn = strings.Join(pc.ALPN, ",")
+		}
+		b, err := json.Marshal(vj)
+		if err != nil {
+			return pc.Raw
+		}
+		return "vmess://" + base64.StdEncoding.EncodeToString(b)
+	default:
+		
+		
+		u, err := url.Parse(pc.Raw)
+		if err != nil {
+			return pc.Raw
+		}
+		u.Host = net.JoinHostPort(ip.String(), strconv.Itoa(port))
+		return u.String()
+	}
+}
+
 
 func defaultScoreWeights() ScoreWeights {
 	return ScoreWeights{
@@ -177,6 +636,16 @@ type ScanConfig struct {
 	GoodScoreThreshold int
 	ScoreWeights       ScoreWeights
 	ScoreConfigPath    string
+
+	TestConfigEnabled bool
+	TestConfigRaw     string 
+	ConfigTestTimeout int   
+	parsedConfig      *ParsedProxyConfig
+
+	AutoSubnetScan  bool
+	SubnetPrefixLen int
+
+	configBehindCF bool
 }
 
 type WorkerPool struct {
@@ -287,7 +756,8 @@ func NewWorkerPool(config *ScanConfig, geoDB *geoip2.Reader, asnDB *geoip2.Reade
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var validFile *os.File
-	if config.SaveValidIPs {
+
+	if config.SaveValidIPs && !config.TestConfigEnabled {
 		timestamp := time.Now().Format("20060102_150405")
 		validFileName := fmt.Sprintf("valid_ips_%s.txt", timestamp)
 		validFile, _ = os.OpenFile(validFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -350,7 +820,12 @@ func (wp *WorkerPool) worker() {
 				if wp.config.RealTimePrint {
 					wp.maybePrintTopResults()
 				}
-				if wp.config.StopAfterGood > 0 && result.Score >= wp.config.GoodScoreThreshold {
+				isGood := result.Score >= wp.config.GoodScoreThreshold
+				if wp.config.TestConfigEnabled {
+
+					isGood = result.ConfigTestOK
+				}
+				if wp.config.StopAfterGood > 0 && isGood {
 					if atomic.AddInt64(&wp.goodCount, 1) >= int64(wp.config.StopAfterGood) {
 						wp.cancel()
 					}
@@ -436,10 +911,14 @@ func (wp *WorkerPool) printTopResults() {
 
 	total, scanned, alive, dead, http3, _ := wp.stats.Snapshot()
 
-	fmt.Printf("%s╔════════════════════════════════════════════════════════════════════════════%s╗%s\n", cyan, cyan, reset)
-	fmt.Printf("%s║                     %sCloudflare Scanner - Top %d Valid IPs%s                  %s║%s\n",
-		cyan, yellow, wp.config.MaxResults, reset, cyan, reset)
-	fmt.Printf("%s╠════════════════════════════════════════════════════════════════════════════%s╣%s\n", cyan, cyan, reset)
+	shown := len(top)
+	if shown > wp.config.MaxResults {
+		shown = wp.config.MaxResults
+	}
+	fmt.Printf("%s╔═════════════════════════════════════════════════════════════════════════════════%s╗%s\n", cyan, cyan, reset)
+	fmt.Printf("%s║                     %sCloudflare Scanner - Top %d Valid IPs%s                  %s     ║%s\n",
+		cyan, yellow, shown, reset, cyan, reset)
+	fmt.Printf("%s╠═════════════════════════════════════════════════════════════════════════════════%s╣%s\n", cyan, cyan, reset)
 
 	elapsed := time.Since(wp.startTime)
 	percent := 0.0
@@ -460,7 +939,7 @@ func (wp *WorkerPool) printTopResults() {
 		etaStr = "calculating"
 	}
 
-	fmt.Printf("%s║%s %sProgress:%s %s%6.1f%%%s  %sAlive:%s %s%5d%s  %sDead:%s %s%5d%s  %sH3:%s %s%4d%s  %sETA:%s %s%9s%s     %s║%s\n",
+	fmt.Printf("%s║%s %sProgress:%s %s%6.1f%%%s  %sAlive:%s %s%5d%s  %sDead:%s %s%5d%s  %sH3:%s %s%4d%s  %sETA:%s %s%9s%s     %s     ║%s\n",
 		cyan, reset,
 		magenta, reset, progressColor, percent, reset,
 		green, reset, green, alive, reset,
@@ -469,7 +948,7 @@ func (wp *WorkerPool) printTopResults() {
 		yellow, reset, yellow, etaStr, reset,
 		cyan, reset)
 
-	fmt.Printf("%s╠════════════════════════════════════════════════════════════════════════════%s╣%s\n", cyan, cyan, reset)
+	fmt.Printf("%s╠═════════════════════════════════════════════════════════════════════════════════%s╣%s\n", cyan, cyan, reset)
 
 	if len(top) == 0 {
 		fmt.Printf("%s║ %-82s ║%s\n", cyan, "  Waiting for results...", reset)
@@ -508,7 +987,16 @@ func (wp *WorkerPool) printTopResults() {
 				latColor = yellow
 			}
 
-			fmt.Printf("%s║ %s#%-2d%s %s%-15s%s %s:%-5d%s %sScore:%s%3d%s  %sLat:%s%7.2fms%s  %sCF:%s%s%s(%d%%) %sH2:%s%s%s %sH3:%s%s%s   %s║%s\n",
+			cfgColor, cfgText := white, "-"
+			if r.ConfigTested {
+				if r.ConfigTestOK {
+					cfgColor, cfgText = green, "✓"
+				} else {
+					cfgColor, cfgText = red, "✗"
+				}
+			}
+
+			fmt.Printf("%s║ %s#%-2d%s %s%-15s%s %s:%-5d%s %sScore:%s%3d%s  %sLat:%s%7.2fms%s  %sCF:%s%s%s(%d%%) %sH2:%s%s%s %sH3:%s%s%s %sCfg:%s%s%s  %s║%s\n",
 				cyan,
 				magenta, i+1, reset,
 				green, r.IP, reset,
@@ -518,11 +1006,12 @@ func (wp *WorkerPool) printTopResults() {
 				white, cfColor, cfText, reset, r.CloudflareConfidence,
 				white, h2Color, h2Text, reset,
 				white, h3Color, h3Text, reset,
+				white, cfgColor, cfgText, reset,
 				cyan, reset)
 		}
 	}
 
-	fmt.Printf("%s╚════════════════════════════════════════════════════════════════════════════%s╝%s\n", cyan, cyan, reset)
+	fmt.Printf("%s╚═════════════════════════════════════════════════════════════════════════════════%s╝%s\n", cyan, cyan, reset)
 
 	fmt.Printf("%sTotal Scanned:%s %s%d%s  |  %sValid saved to:%s %svalid_ips_*.txt%s\n",
 		cyan, reset,
@@ -697,6 +1186,21 @@ func (wp *WorkerPool) scanIP(ip net.IP) ScanResult {
 		}
 	} else {
 		result.PacketLoss = -1
+	}
+
+	if wp.config.TestConfigEnabled && wp.config.parsedConfig != nil && result.IsAlive {
+
+		ctSeconds := wp.config.ConfigTestTimeout
+		if ctSeconds <= 0 {
+			ctSeconds = wp.config.Timeout + 3
+		}
+		timeout := time.Duration(ctSeconds) * time.Second
+		ctRes := TestConfigAgainstIP(wp.config.parsedConfig, ip, result.Port, timeout)
+		result.ConfigTested = true
+		result.ConfigTestOK = ctRes.OK
+		result.ConfigTestError = ctRes.Error
+		result.ConfigTestMs = ctRes.DurationMs
+		result.ConfigFinalURI = ctRes.FinalURI
 	}
 
 	result.Score = wp.calculateScore(&result)
@@ -1433,6 +1937,82 @@ func addBigOffset(base net.IP, offset *big.Int) net.IP {
 	return result
 }
 
+func subnetCIDR(ip net.IP, prefixLen int) string {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return ip.String() + "/32"
+	}
+	mask := net.CIDRMask(prefixLen, 32)
+	network := ip4.Mask(mask)
+	return fmt.Sprintf("%s/%d", network.String(), prefixLen)
+}
+
+func resolveConfigSourcing(config *ScanConfig, pc *ParsedProxyConfig) (behindCF bool) {
+	domain := ""
+	if h := firstNonEmpty(pc.HostHdr, pc.SNI); h != "" {
+		if hostOnly, _, err := net.SplitHostPort(h); err == nil {
+			h = hostOnly
+		}
+		if net.ParseIP(h) == nil {
+			domain = h
+		}
+	}
+
+	sec := strings.ToLower(strings.TrimSpace(pc.Security))
+	behindCF = domain != "" && sec != "" && sec != "none" && sec != "reality"
+
+	if behindCF {
+		if domain != "" && (config.TestDomain == "" || config.TestDomain == "www.cloudflare.com") {
+			config.TestDomain = domain
+			fmt.Printf("Config test: %s looks CDN-fronted (security=%s, host/sni=%s) - keeping Cloudflare ranges as the source and using %s as the validation domain\n", pc.Protocol, pc.Security, domain, domain)
+		}
+		return true
+	}
+
+	fmt.Printf("Config test: %s doesn't look Cloudflare-fronted (security=%s%s) - generic Cloudflare ranges won't reach it\n", pc.Protocol, pc.Security, ternaryStr(domain == "", ", no host/sni domain", ""))
+	if config.AutoSubnetScan && len(config.Sources) == 1 && config.Sources[0] == "cloudflare" {
+		switchSourceToConfigSubnet(config, pc)
+	}
+	return false
+}
+
+func ensureConfigPortScanned(config *ScanConfig, pc *ParsedProxyConfig) {
+	if pc.OrigPort <= 0 {
+		return
+	}
+	for _, p := range config.Ports {
+		if p == pc.OrigPort {
+			return
+		}
+	}
+	config.Ports = append(config.Ports, pc.OrigPort)
+	fmt.Printf("Config test: added the config's own port :%d to the scan port list\n", pc.OrigPort)
+}
+
+func switchSourceToConfigSubnet(config *ScanConfig, pc *ParsedProxyConfig) bool {
+	origIP := net.ParseIP(pc.OrigHost)
+	if origIP == nil || origIP.To4() == nil {
+		return false
+	}
+	prefix := config.SubnetPrefixLen
+	if prefix <= 0 || prefix > 32 {
+		prefix = 24
+	}
+	cidr := subnetCIDR(origIP, prefix)
+	config.Sources = []string{"range:" + cidr}
+	fmt.Printf("Config test: scanning %s's own /%d subnet (%s)\n", origIP.String(), prefix, cidr)
+
+	ensureConfigPortScanned(config, pc)
+	return true
+}
+
+func ternaryStr(cond bool, a, b string) string {
+	if cond {
+		return a
+	}
+	return b
+}
+
 func expandCIDR(cidr string, limit int, random bool) []net.IP {
 	_, network, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -1825,15 +2405,25 @@ Flags:
   -no-shuffle              Disable shuffling the overall scan order
   -latency-samples <num>   Steady-state RTT samples per IP used for jitter/failure-rate stats (default: 4)
   -stop-after <num>        Stop scanning once this many good results are found (0 = scan everything)
-  -good-score <num>        Score threshold used by -stop-after (default: 70)
+                           If -config is set, "good" means the config actually tested OK on that IP,
+                           not the generic score.
+  -good-score <num>        Score threshold used by -stop-after when no -config is set (default: 70)
+  -no-auto-subnet          Disable auto-subnet: normally, if -config's address is a bare IP and
+                           -source was left at its default, the scanner auto-switches to that IP's
+                           own subnet instead of generic Cloudflare ranges
+  -subnet-prefix <num>     Prefix length for the auto-subnet source above (default: 24, i.e. a /24)
   -score-config <path>     YAML file overriding score weights (latency/reliability/http3/tls/speed/cloudflare)
   -timeout <seconds>       HTTP/TLS timeout in seconds (default: 5)
   -port-timeout <seconds>  Port scan timeout in seconds (default: 2)
+  -config-test-timeout <seconds>  Timeout for the -config check itself (default: -timeout + 3).
+                           Config tests do a real TLS/WS handshake through the candidate IP,
+                           which is often slower than a plain TCP/HTTP probe - raise this if a
+                           slow edge or a far-away IP is getting cut off before it can answer.
   -rate <num>              Max new IP scans started per second (0 = unlimited)
-  -max <num>               Maximum results to show / keep in the sorted top-results file (default: 20)
+  -max <num>               Maximum results to keep/show, sorted by -sort (default: 20)
   -max-per-range <num>     Maximum IPs collected per CIDR range (default: 10000)
-  -sort <sort>             Sort by: score, latency (applies to the top-results file; the main
-                           output file is written in scan-completion order to keep memory bounded)
+  -sort <sort>             Sort by: score, latency (applies to the on-screen top results only;
+                           the main output file is written in scan-completion order to keep memory bounded)
   -quiet                   Disable real-time output
   -noprogress              Disable progress display
   -nocolor                 Disable colors
@@ -1877,6 +2467,8 @@ func defaultConfig() *ScanConfig {
 		StopAfterGood:      0,
 		GoodScoreThreshold: 70,
 		ScoreWeights:       defaultScoreWeights(),
+		AutoSubnetScan:     true,
+		SubnetPrefixLen:    24,
 	}
 }
 
@@ -1970,6 +2562,13 @@ func parseArgs(args []string) (*ScanConfig, bool) {
 				config.GoodScoreThreshold, _ = strconv.Atoi(args[i+1])
 				i++
 			}
+		case "-no-auto-subnet":
+			config.AutoSubnetScan = false
+		case "-subnet-prefix":
+			if i+1 < len(args) {
+				config.SubnetPrefixLen, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "-score-config":
 			if i+1 < len(args) {
 				config.ScoreConfigPath = args[i+1]
@@ -1983,6 +2582,11 @@ func parseArgs(args []string) (*ScanConfig, bool) {
 		case "-port-timeout":
 			if i+1 < len(args) {
 				config.PortScanTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-config-test-timeout":
+			if i+1 < len(args) {
+				config.ConfigTestTimeout, _ = strconv.Atoi(args[i+1])
 				i++
 			}
 		case "-rate":
@@ -2041,24 +2645,68 @@ func RunScanner(config *ScanConfig) error {
 		config.ScoreWeights = defaultScoreWeights()
 	}
 
+	if config.TestConfigEnabled {
+		if strings.TrimSpace(config.TestConfigRaw) == "" {
+			return fmt.Errorf("config test enabled but no config was provided")
+		}
+		pc, err := ParseProxyConfigLine(config.TestConfigRaw)
+		if err != nil {
+			return fmt.Errorf("error parsing supplied config: %v", err)
+		}
+		config.parsedConfig = pc
+		fmt.Printf("Config test enabled: will verify %s configs on IPs that pass validation\n", pc.Protocol)
+		ensureConfigPortScanned(config, pc)
+		config.configBehindCF = resolveConfigSourcing(config, pc)
+	}
+
+	succeeded, err := runOneScanPass(config)
+	if err != nil {
+		return err
+	}
+
+	if config.TestConfigEnabled && config.configBehindCF && config.AutoSubnetScan &&
+		succeeded == 0 && config.parsedConfig != nil {
+		if switchSourceToConfigSubnet(config, config.parsedConfig) {
+			fmt.Println("\nNo working IP found via Cloudflare ranges for this config - falling back to scanning its own subnet...")
+			config.OutputPath = withSuffix(config.OutputPath, "_subnet_fallback")
+			if _, err := runOneScanPass(config); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func runOneScanPass(config *ScanConfig) (succeeded int, err error) {
 	geoDB, _ := loadGeoDB(config.GeoIPDBPath)
 	asnDB, _ := loadGeoDB(config.ASNDBPath)
 
 	ips, err := collectIPs(config)
 	if err != nil {
-		return fmt.Errorf("error collecting IPs: %v", err)
+		return 0, fmt.Errorf("error collecting IPs: %v", err)
 	}
 
 	fmt.Printf("Collected %d IPs to scan\n", len(ips))
 	fmt.Printf("Using %d workers, scanning ports: %v\n", config.WorkerCount, config.Ports)
-	fmt.Printf("Sort by: %s (applies to the top-results file only)\n", config.SortBy)
-	fmt.Printf("Output will be streamed to: %s\n", config.OutputPath)
 	fmt.Println("Scanning... (press Ctrl+C to stop)")
 	fmt.Println()
 
-	writer, err := newResultWriter(config)
-	if err != nil {
-		return fmt.Errorf("error creating output writer: %v", err)
+	var writer *resultWriter
+	var configWriter *configTestWriter
+	if config.TestConfigEnabled {
+		configWriter, err = newConfigTestWriter()
+		if err != nil {
+			return 0, fmt.Errorf("error creating config-test output files: %v", err)
+		}
+		fmt.Printf("Tested IPs will be saved to: %s\n", configWriter.ipsPath)
+		fmt.Printf("Working configs (clean IP substituted in) will be saved to: %s\n", configWriter.successPath)
+	} else {
+		fmt.Printf("Output will be streamed to: %s\n", config.OutputPath)
+		writer, err = newResultWriter(config)
+		if err != nil {
+			return 0, fmt.Errorf("error creating output writer: %v", err)
+		}
 	}
 
 	pool := NewWorkerPool(config, geoDB, asnDB)
@@ -2085,6 +2733,14 @@ func RunScanner(config *ScanConfig) error {
 	go func() {
 		defer collector.Done()
 		for result := range pool.results {
+			if configWriter != nil {
+				if result.ConfigTested {
+					if err := configWriter.Write(result); err != nil {
+						fmt.Printf("Warning: failed to write config-test result for %s: %v\n", result.IP, err)
+					}
+				}
+				continue
+			}
 			if err := writer.Write(result); err != nil {
 				fmt.Printf("Warning: failed to write result for %s: %v\n", result.IP, err)
 			}
@@ -2105,17 +2761,22 @@ dispatch:
 	close(pool.results)
 	collector.Wait()
 
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("error finalizing output: %v", err)
+	if writer != nil {
+		if err := writer.Close(); err != nil {
+			return 0, fmt.Errorf("error finalizing output: %v", err)
+		}
+	}
+
+	if configWriter != nil {
+		if err := configWriter.Close(); err != nil {
+			fmt.Printf("Warning: failed to finalize config-test files: %v\n", err)
+		}
+		fmt.Printf("\nConfig test: %d tested, %d succeeded\n", configWriter.tested, configWriter.succeeded)
+		succeeded = configWriter.succeeded
 	}
 
 	pool.cancel()
 	pool.limiter.Close()
-
-	if pool.validFile != nil {
-		pool.validFile.Close()
-		fmt.Printf("\nValid IPs saved to: %s\n", pool.validFile.Name())
-	}
 
 	total, scanned, alive, dead, http3, best := pool.stats.Snapshot()
 	fmt.Printf("\n\nScan Complete!\n")
@@ -2127,15 +2788,11 @@ dispatch:
 	copy(top, pool.topResults)
 	pool.topMu.Unlock()
 
-	topPath := topResultsPath(config.OutputPath)
-	if err := writeTopResults(top, topPath); err != nil {
-		fmt.Printf("Warning: failed to write sorted top-results file: %v\n", err)
-	} else {
-		fmt.Printf("Full results streamed to: %s\n", config.OutputPath)
-		fmt.Printf("Sorted top %d results saved to: %s\n", len(top), topPath)
+	if writer != nil {
+		fmt.Printf("Results saved to: %s\n", config.OutputPath)
 	}
 
-	fmt.Printf("\nTop %d results:\n", config.MaxResults)
+	fmt.Printf("\nTop %d results:\n", len(top))
 	for i, r := range top {
 		cf, h2, h3 := "✗", "✗", "✗"
 		if r.IsCloudflare {
@@ -2147,14 +2804,35 @@ dispatch:
 		if r.HTTP3Supported {
 			h3 = "✓"
 		}
-		fmt.Printf("%-15s Score:%3d Lat:%7.2fms CF:%s(%d%%) H2:%s H3:%s Ray:%s\n",
-			r.IP, r.Score, r.TCPConnectMs, cf, r.CloudflareConfidence, h2, h3, r.CFRay)
+		cfg := "-"
+		if r.ConfigTested {
+			if r.ConfigTestOK {
+				cfg = "✓"
+			} else {
+				cfg = "✗"
+			}
+		}
+		fmt.Printf("%-15s Score:%3d Lat:%7.2fms CF:%s(%d%%) H2:%s H3:%s Cfg:%s Ray:%s\n",
+			r.IP, r.Score, r.TCPConnectMs, cf, r.CloudflareConfidence, h2, h3, cfg, r.CFRay)
+		if r.ConfigTested && !r.ConfigTestOK && r.ConfigTestError != "" {
+			fmt.Printf("  ↳ config test failed: %s\n", r.ConfigTestError)
+		}
 		if i+1 >= config.MaxResults {
 			break
 		}
 	}
 
-	return nil
+	return succeeded, nil
+}
+
+func withSuffix(path, suffix string) string {
+	ext := ""
+	base := path
+	if idx := strings.LastIndex(path, "."); idx > 0 {
+		ext = path[idx:]
+		base = path[:idx]
+	}
+	return base + suffix + ext
 }
 
 func topResultsPath(outputPath string) string {
