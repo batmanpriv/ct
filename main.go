@@ -47,7 +47,7 @@ const (
 	Bold    = "\033[1m"
 )
 
-const VERSION = "1.4.15"
+const VERSION = "1.5.1"
 
 type Module string
 
@@ -526,6 +526,9 @@ func runCFScan(args []string) error {
 		SortBy:           "score",
 		NoColor:          false,
 		MaxIPsPerRange:   10000,
+		AutoSubnetScan:   true,
+		SubnetPrefixLen:  24,
+		GoodScoreThreshold: 70,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -601,10 +604,51 @@ func runCFScan(args []string) error {
 			config.ShowProgress = false
 		case "-nocolor":
 			config.NoColor = true
+		case "-config":
+			if i+1 < len(args) {
+				if err := applyConfigTestFlag(config, args[i+1]); err != nil {
+					return err
+				}
+				i++
+			}
+		case "-stop-after":
+			if i+1 < len(args) {
+				config.StopAfterGood, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-good-score":
+			if i+1 < len(args) {
+				config.GoodScoreThreshold, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "-no-auto-subnet":
+			config.AutoSubnetScan = false
+		case "-subnet-prefix":
+			if i+1 < len(args) {
+				config.SubnetPrefixLen, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		}
 	}
 
 	return cf.RunScanner(config)
+}
+
+func applyConfigTestFlag(config *cf.ScanConfig, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	lines, err := cf.LoadConfigLines(raw)
+	if err != nil {
+		return fmt.Errorf("invalid -config value: %v", err)
+	}
+	config.TestConfigEnabled = true
+	config.TestConfigRaw = lines[0]
+	if len(lines) > 1 {
+		fmt.Printf("Note: %d configs found, using the first one for testing\n", len(lines))
+	}
+	return nil
 }
 
 func printCFHelp() {
@@ -626,6 +670,20 @@ Flags:
   -port-timeout <seconds>  Port scan timeout (default: 2)
   -max <num>               Max results to show (default: 20)
   -sort <sort>             Sort by: score, latency (default: score)
+  -config <config|file>    Optional: xray/v2ray config (trojan/vless/vmess/ss,
+                           raw or base64) or a path to a file with one. Every
+                           IP that answers on its port is also tested with this
+                           config as the final step (a real TCP/TLS/WS check,
+                           not just a Cloudflare fingerprint).
+  -stop-after <num>        Stop once this many IPs are found (0 = scan everything).
+                           With -config set, "found" means the config actually
+                           worked on that IP.
+  -good-score <num>        Score threshold used by -stop-after when no -config is set (default: 70)
+  -no-auto-subnet          If -config's address is a bare IP (not a domain), the scanner
+                           normally auto-scans that IP's own /24 subnet instead of generic
+                           Cloudflare ranges (since a bare-IP config isn't going through Cloudflare
+                           anyway). Pass this to disable that and use -source as given.
+  -subnet-prefix <num>     Prefix length for the auto-subnet above (default: 24)
   -quiet                   Disable real-time output
   -noprogress              Disable progress
   -nocolor                 Disable colors
@@ -634,7 +692,9 @@ Flags:
 Examples:
   ct cf scan
   ct cf scan -workers 200 -ports 443,8443
-  ct cf scan -source custom:ips.txt -domain example.com -sort latency`)
+  ct cf scan -source custom:ips.txt -domain example.com -sort latency
+  ct cf scan -config 'trojan://...@1.2.3.4:443?...'
+  ct cf scan -config myconfig.txt`)
 }
 
 func clearScreen() {
@@ -733,7 +793,7 @@ func checkUpdate() error {
 
 func interactiveCF(ctx *AppContext) error {
 	fmt.Println("\n" + Cyan + "╔════════════════════════════════════════════╗" + Reset)
-	fmt.Println(Cyan + "║        Cloudflare IP Scanner              ║" + Reset)
+	fmt.Println(Cyan + "║        Cloudflare IP Scanner               ║" + Reset)
 	fmt.Println(Cyan + "╚════════════════════════════════════════════╝" + Reset)
 	fmt.Println()
 
@@ -758,77 +818,112 @@ func interactiveCF(ctx *AppContext) error {
 		SortBy:           "score",
 		NoColor:          false,
 		MaxIPsPerRange:   10000,
+		AutoSubnetScan:   true,
+		SubnetPrefixLen:  24,
+		GoodScoreThreshold: 70,
 	}
 
-	defaultRanges := cf.GetCloudflareRanges()
-	allRanges := cf.GetAllCloudflareRanges()
-	
-	fmt.Println(Green + "Default Cloudflare IP Ranges (fast scan):" + Reset)
-	for _, r := range defaultRanges {
-		fmt.Printf("  %s", r)
-	}
-	fmt.Println()
-	
-	timeStr, color := cf.EstimateScanTime(defaultRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
-	fmt.Printf(color+"Estimated scan time with %d workers: %s\n"+Reset, config.WorkerCount, timeStr)
-
-	fmt.Println("\n" + Yellow + "Additional ranges available (slower but more comprehensive):" + Reset)
-	extraRanges := []string{}
-	for _, r := range allRanges {
-		isDefault := false
-		for _, d := range defaultRanges {
-			if r == d {
-				isDefault = true
-				break
-			}
-		}
-		if !isDefault {
-			extraRanges = append(extraRanges, r)
-		}
-	}
-	
-	for i, r := range extraRanges {
-		if i%3 == 0 && i > 0 {
-			fmt.Println()
-		}
-		fmt.Printf("  %s", r)
-	}
-	fmt.Println()
-	
-	allTimeStr, allColor := cf.EstimateScanTime(allRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
-	fmt.Printf(allColor+"Full scan with all ranges would take: %s\n"+Reset, allTimeStr)
-	
-	fmt.Println("\n" + Cyan + "Select IP source type:" + Reset)
-	fmt.Println("  1) Cloudflare default ranges (fast)")
-	fmt.Println("  2) All Cloudflare ranges (comprehensive)")
-	fmt.Println("  3) Custom CIDR range(s)")
-	fmt.Println("  4) IP file (one IP per line)")
-	
-	sourceChoice, err := askIntDefault(ctx, "Choose", 1)
+	wantConfigTest, err := askYesNoDefault(ctx, "Test a specific xray/v2ray config against each clean IP found?", false)
 	if err != nil {
 		return err
 	}
-	
-	switch sourceChoice {
-	case 1:
-		config.Sources = []string{"cloudflare"}
-	case 2:
-		config.Sources = []string{"cloudflare_all"}
-	case 3:
-		customRange, err := askLine(ctx, "Enter CIDR range(s) (comma-separated, e.g., 104.16.0.0/13,172.64.0.0/13)")
+
+	autoSourcing := false
+	if wantConfigTest {
+		configInput, err := askLine(ctx, "Paste the config (trojan/vless/vmess/ss, raw or base64) or a file path")
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(customRange) != "" {
-			config.Sources = []string{"range:" + strings.TrimSpace(customRange)}
+		if err := applyConfigTestFlag(config, configInput); err != nil {
+			fmt.Println(Red + "Error: " + err.Error() + Reset)
+		} else if config.TestConfigEnabled {
+			autoSourcing = true
+			fmt.Printf("%sConfig test:%s enabled - source and validation domain will be picked automatically from this config (Cloudflare ranges if it looks CDN-fronted, otherwise its own subnet)\n", Green, Reset)
 		}
-	case 4:
-		file, err := askLine(ctx, "IP file path (one IP per line or CIDR)")
+	}
+
+	var defaultRanges, allRanges []string
+	sourceChoice := 1
+
+	if !autoSourcing {
+		defaultRanges = cf.GetCloudflareRanges()
+		allRanges = cf.GetAllCloudflareRanges()
+
+		fmt.Println(Green + "Default Cloudflare IP Ranges (fast scan):" + Reset)
+		for _, r := range defaultRanges {
+			fmt.Printf("  %s", r)
+		}
+		fmt.Println()
+
+		timeStr, color := cf.EstimateScanTime(defaultRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
+		fmt.Printf(color+"Estimated scan time with %d workers: %s\n"+Reset, config.WorkerCount, timeStr)
+
+		fmt.Println("\n" + Yellow + "Additional ranges available (slower but more comprehensive):" + Reset)
+		extraRanges := []string{}
+		for _, r := range allRanges {
+			isDefault := false
+			for _, d := range defaultRanges {
+				if r == d {
+					isDefault = true
+					break
+				}
+			}
+			if !isDefault {
+				extraRanges = append(extraRanges, r)
+			}
+		}
+
+		for i, r := range extraRanges {
+			if i%3 == 0 && i > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("  %s", r)
+		}
+		fmt.Println()
+
+		allTimeStr, allColor := cf.EstimateScanTime(allRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
+		fmt.Printf(allColor+"Full scan with all ranges would take: %s\n"+Reset, allTimeStr)
+
+		fmt.Println("\n" + Cyan + "Select IP source type:" + Reset)
+		fmt.Println("  1) Cloudflare default ranges (fast)")
+		fmt.Println("  2) All Cloudflare ranges (comprehensive)")
+		fmt.Println("  3) Custom CIDR range(s)")
+		fmt.Println("  4) IP file (one IP per line)")
+
+		sourceChoice, err = askIntDefault(ctx, "Choose", 1)
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(file) != "" {
-			config.Sources = []string{"custom:" + strings.TrimSpace(file)}
+
+		switch sourceChoice {
+		case 1:
+			config.Sources = []string{"cloudflare"}
+		case 2:
+			config.Sources = []string{"cloudflare_all"}
+		case 3:
+			customRange, err := askLine(ctx, "Enter CIDR range(s) (comma-separated, e.g., 104.16.0.0/13,172.64.0.0/13)")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(customRange) != "" {
+				config.Sources = []string{"range:" + strings.TrimSpace(customRange)}
+			}
+		case 4:
+			file, err := askLine(ctx, "IP file path (one IP per line or CIDR)")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(file) != "" {
+				config.Sources = []string{"custom:" + strings.TrimSpace(file)}
+			}
+		}
+
+		domain, err := askLine(ctx, "Test domain (default: www.cloudflare.com)")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(domain) != "" {
+			config.TestDomain = domain
 		}
 	}
 
@@ -860,36 +955,38 @@ func interactiveCF(ctx *AppContext) error {
 	}
 	config.MaxIPsPerRange = maxIPs
 
-	domain, err := askLine(ctx, "Test domain (default: www.cloudflare.com)")
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(domain) != "" {
-		config.TestDomain = domain
-	}
-
 	fmt.Println("\n" + Cyan + "╔════════════════════════════════════════════╗" + Reset)
-	fmt.Println(Cyan + "║           Scan Configuration                ║" + Reset)
+	fmt.Println(Cyan + "║           Scan Configuration               ║" + Reset)
 	fmt.Println(Cyan + "╚════════════════════════════════════════════╝" + Reset)
-	fmt.Printf("%sSource:%s %v\n", Green, Reset, config.Sources)
+	if autoSourcing {
+		fmt.Printf("%sSource:%s auto - Cloudflare ranges if the config looks CDN-fronted, else its own subnet (falls back automatically if the first try finds nothing)\n", Green, Reset)
+		fmt.Printf("%sDomain:%s auto - taken from the config's host/SNI\n", Green, Reset)
+	} else {
+		fmt.Printf("%sSource:%s %v\n", Green, Reset, config.Sources)
+		fmt.Printf("%sDomain:%s %s\n", Green, Reset, config.TestDomain)
+	}
 	fmt.Printf("%sWorkers:%s %d\n", Green, Reset, config.WorkerCount)
 	fmt.Printf("%sPorts:%s %v\n", Green, Reset, config.Ports)
-	fmt.Printf("%sDomain:%s %s\n", Green, Reset, config.TestDomain)
 	fmt.Printf("%sMax IPs per range:%s %d\n", Green, Reset, config.MaxIPsPerRange)
-	
-	var finalRanges []string
-	if len(config.Sources) > 0 && strings.HasPrefix(config.Sources[0], "range:") {
-		fmt.Printf("%sCustom ranges:%s %s\n", Yellow, Reset, strings.TrimPrefix(config.Sources[0], "range:"))
-	} else if len(config.Sources) > 0 && strings.HasPrefix(config.Sources[0], "custom:") {
-		fmt.Printf("%sIP file:%s %s\n", Yellow, Reset, strings.TrimPrefix(config.Sources[0], "custom:"))
-	} else {
-		if sourceChoice == 2 {
-			finalRanges = allRanges
+	if config.TestConfigEnabled {
+		fmt.Printf("%sConfig test:%s enabled\n", Green, Reset)
+	}
+
+	if !autoSourcing {
+		if len(config.Sources) > 0 && strings.HasPrefix(config.Sources[0], "range:") {
+			fmt.Printf("%sCustom ranges:%s %s\n", Yellow, Reset, strings.TrimPrefix(config.Sources[0], "range:"))
+		} else if len(config.Sources) > 0 && strings.HasPrefix(config.Sources[0], "custom:") {
+			fmt.Printf("%sIP file:%s %s\n", Yellow, Reset, strings.TrimPrefix(config.Sources[0], "custom:"))
 		} else {
-			finalRanges = defaultRanges
+			var finalRanges []string
+			if sourceChoice == 2 {
+				finalRanges = allRanges
+			} else {
+				finalRanges = defaultRanges
+			}
+			finalTimeStr, finalColor := cf.EstimateScanTime(finalRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
+			fmt.Printf("%sEstimated time:%s %s%s\n", Yellow, Reset, finalColor, finalTimeStr)
 		}
-		finalTimeStr, finalColor := cf.EstimateScanTime(finalRanges, config.WorkerCount, config.Ports, config.MaxIPsPerRange)
-		fmt.Printf("%sEstimated time:%s %s%s\n", Yellow, Reset, finalColor, finalTimeStr)
 	}
 
 	fmt.Println("\n" + Green + "Starting scan..." + Reset)
