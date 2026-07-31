@@ -1,21 +1,24 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e9de135d-5689-4d55-badf-3a84e74beadf" alt="CT Logo" width="200">
+</p>
+
 # <h1 align="center"> CT - Check Test</h1>
 
 <p align="center">
-
-  <img src"https://github.com/user-attachments/assets/e9de135d-5689-4d55-badf-3a84e74beadf">
 Version: 1.5.1
+</p>
 
 <p align="center">
   English | <a href="readmefa.md">فارسی</a>
 </p>
 
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/batmanpriv/CheckTest)
+<p align="center">
+  [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/batmanpriv/CheckTest)
+</p>
 
 **CT** is a fast, flexible, multi-purpose network testing suite written in Go. It brings together DNS benchmarking, proxy checking, MTProto testing, Xray/V2Ray config validation, public source scraping, and **Cloudflare IP scanning** in one powerful tool.
-
-</p>
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/0413df28-3e25-4d35-b03b-df09fbcede0c" alt="CT Banner" width="100%">
