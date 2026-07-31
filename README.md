@@ -7,8 +7,7 @@ Version: 1.5.1
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](https://github.com/batmanpriv/CheckTest)
 
-- [🇬🇧 English](#-ct---check-test-english)
-- [🇮🇷 فارسی](#readmefa.md)
+English | <a href="readmefa.md">فارسی</a>
 
 **CT** is a fast, flexible, multi-purpose network testing suite written in Go. It brings together DNS benchmarking, proxy checking, MTProto testing, Xray/V2Ray config validation, public source scraping, and **Cloudflare IP scanning** in one powerful tool.
 
