@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e9de135d-5689-4d55-badf-3a84e74beadf" alt="CT Logo" width="200">
+</p>
+
 # 🚀 CT - چک‌تست (Check Test)
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
